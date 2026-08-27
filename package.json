@@ -1,0 +1,57 @@
+{
+  "name": "preenchedor-amigos-do-fred",
+  "private": true,
+  "version": "1.0.4",
+  "description": "Painel local para preparar um cadastro para revisão.",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:web": "node servidor.js",
+    "dist": "electron-builder --win nsis",
+    "dist:publish": "electron-builder --win nsis --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "playwright": "^1.56.1"
+  },
+  "devDependencies": {
+    "electron": "^38.1.2",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "br.com.painelpreenchimento.amigosdofred",
+    "productName": "Painel de Preenchimento",
+    "files": [
+      "electron-main.js",
+      "preload.js",
+      "servidor.js",
+      "interface.html",
+      "estilo.css",
+      "app.js",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "publish": {
+        "provider": "generic",
+        "url": "https://github.com/tteuwxsw/bot/releases/latest/download"
+      }
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "allowElevation": true
+    }
+  },
+  "publish": {
+    "provider": "generic",
+    "url": "https://github.com/tteuwxsw/bot/releases/latest/download"
+  },
+  "allowScripts": {
+    "electron@38.8.6": true,
+    "electron-winstaller@5.4.0": true
+  }
+}
