@@ -17,10 +17,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -33,7 +33,7 @@ jobs:
         run: |
           $patch = [int]$env:GITHUB_RUN_NUMBER + 4
           $version = "1.0.$patch"
-          npm version $version --no-git-tag-version
+          npm version $version --no-git-tag-version --allow-same-version
           "VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Build installer
