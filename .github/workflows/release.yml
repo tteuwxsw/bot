@@ -1,0 +1,58 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Define version
+        shell: pwsh
+        run: |
+          $patch = [int]$env:GITHUB_RUN_NUMBER + 4
+          $version = "1.0.$patch"
+          npm version $version --no-git-tag-version
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build installer
+        run: npm run dist
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $source = "dist\Painel de Preenchimento Setup $env:VERSION.exe"
+          $asset = "dist\Painel.de.Preenchimento.Setup.$env:VERSION.exe"
+          Copy-Item -LiteralPath $source -Destination $asset
+          "RELEASE_ASSET=$asset" >> $env:GITHUB_ENV
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$env:VERSION" "$env:RELEASE_ASSET" `
+            --target "$env:GITHUB_SHA" `
+            --title "v$env:VERSION" `
+            --notes "Atualização automática gerada a partir do commit $env:GITHUB_SHA."

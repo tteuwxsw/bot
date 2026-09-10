@@ -1,7 +1,11 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { chromium } = require('playwright');
+
+const execFileAsync = promisify(execFile);
 
 const PORTA = 3030;
 const URL_CADASTRO = 'https://amigosdofred.com.br/cadastro';
@@ -10,12 +14,10 @@ let relatorioHtml = null;
 
 let browser;
 let page;
+let chromePid;
 let fila = [];
 let arquivoOriginal;
 let registroAtual;
-let usandoAleatorio = false;
-let totalAleatorio = 0;
-let concluidosAleatorio = 0;
 let pararSolicitado = false;
 let logs = [];
 let resultados = [];
@@ -52,28 +54,18 @@ const SOBRENOMES = [
   'França','Barros','Moraes','Medeiros','Bezerra','Rangel','Macedo',
 ];
 
-const NUMEROS_UTILIZADOS = new Set();
+const nomesUsados = new Set();
 
 function gerarNomeAleatorio() {
-  const primeiro = PRIMEIROS_NOMES[Math.floor(Math.random() * PRIMEIROS_NOMES.length)];
-  const s1 = SOBRENOMES[Math.floor(Math.random() * SOBRENOMES.length)];
-  const s2 = SOBRENOMES[Math.floor(Math.random() * SOBRENOMES.length)];
-  return `${primeiro} ${s1} ${s2}`;
-}
-
-function gerarTelefoneDF() {
-  let telefone;
+  let nome;
   do {
-    const p1 = String(90000 + Math.floor(Math.random() * 10000));
-    const p2 = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
-    telefone = `(61) ${p1}-${p2}`;
-  } while (NUMEROS_UTILIZADOS.has(telefone));
-  NUMEROS_UTILIZADOS.add(telefone);
-  return telefone;
-}
-
-function criarDadosAleatorios() {
-  return { nome: gerarNomeAleatorio(), telefone: gerarTelefoneDF() };
+    const primeiro = PRIMEIROS_NOMES[Math.floor(Math.random() * PRIMEIROS_NOMES.length)];
+    const s1 = SOBRENOMES[Math.floor(Math.random() * SOBRENOMES.length)];
+    const s2 = SOBRENOMES[Math.floor(Math.random() * SOBRENOMES.length)];
+    nome = `${primeiro} ${s1} ${s2}`;
+  } while (nomesUsados.has(nome));
+  nomesUsados.add(nome);
+  return nome;
 }
 
 function sleep(ms) {
@@ -194,7 +186,6 @@ function gerarRelatorioHTML() {
 }
 
 function carregarDados(caminho) {
-  usandoAleatorio = false;
   resultados = [];
   registrarLog('Lendo a lista de dados selecionada.');
   if (path.extname(caminho).toLowerCase() !== '.txt') throw new Error('Selecione um arquivo .txt.');
@@ -211,14 +202,43 @@ function carregarDados(caminho) {
   status = { ativo: false, mensagem: `${fila.length} registro(s) carregado(s).`, dados: null, restantes: fila.length };
 }
 
+function carregarTexto(texto, apenasNumeros) {
+  resultados = [];
+  nomesUsados.clear();
+  registrarLog('Processando contatos do texto.');
+  const linhas = texto.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const novosDados = linhas.map((linha, i) => {
+    if (apenasNumeros) {
+      const telefone = linha.replace(/\D/g, '');
+      if (telefone.length < 10) throw new Error(`Linha ${i + 1}: telefone inválido.`);
+      const nome = gerarNomeAleatorio();
+      return { nome, telefone: linha.trim() };
+    }
+    const [nome, telefone] = linha.split('|').map((p) => p.trim());
+    if (!nome || !telefone) throw new Error(`Linha ${i + 1}: use o formato Nome | Telefone.`);
+    return { nome, telefone };
+  });
+  if (!novosDados.length) throw new Error('Nenhum contato válido encontrado.');
+  fila = novosDados;
+  arquivoOriginal = null;
+  registrarLog(`${fila.length} contato(s) adicionado(s) à fila.`, 'sucesso');
+  status = { ativo: false, mensagem: `${fila.length} contato(s) carregado(s).`, dados: null, restantes: fila.length };
+}
+
 async function abrirBrowser() {
   if (!browser) {
-    const args = ocultarChrome ? ['--window-position=-32000,-32000'] : [];
+    const args = [
+      '--disable-backgrounding-occluded-windows',
+      '--disable-background-timer-throttling',
+      '--disable-renderer-backgrounding',
+    ];
+    if (ocultarChrome) args.push('--window-position=-32000,-32000');
     browser = await chromium.launch({ channel: 'chrome', headless: false, args });
     registrarLog('Google Chrome aberto.');
     browser.on('disconnected', () => {
       browser = undefined;
       page = undefined;
+      chromePid = undefined;
       status.ativo = false;
       status.mensagem = 'O Chrome foi fechado.';
       registrarLog('O Chrome foi fechado.', 'aviso');
@@ -226,36 +246,124 @@ async function abrirBrowser() {
   }
   if (!page || page.isClosed()) {
     page = await browser.newPage();
-    if (ocultarChrome) {
-      try {
-        const cdp = await page.context().newCDPSession(page);
-        const { windowId } = await cdp.send('Browser.getWindowForTarget');
-        await cdp.send('Browser.setWindowBounds', { windowId, bounds: { left: -32000, top: -32000 } });
-      } catch (e) {}
-    }
+    await identificarProcessoChrome();
+    if (ocultarChrome) await alterarVisibilidadeChrome(true);
     registrarLog('Nova aba criada.');
   }
 }
 
-async function selecionarSelect2(seletor, texto) {
-  await page.locator(seletor).click();
-  const busca = page.locator('input.select2-search__field');
-  await busca.fill(texto);
-  const opcao = page.locator('.select2-results__option').filter({ hasText: texto }).first();
-  await opcao.waitFor({ state: 'visible', timeout: 10000 });
-  const encontrado = (await opcao.innerText()).trim();
-  if (encontrado !== texto) throw new Error(`Não encontrei a opção: ${texto}`);
-  await opcao.click();
+async function identificarProcessoChrome() {
+  if (chromePid || !browser) return;
+  const cdp = await browser.newBrowserCDPSession();
+  try {
+    const { processInfo } = await cdp.send('SystemInfo.getProcessInfo');
+    const processo = processInfo.find((item) => item.type === 'browser');
+    chromePid = processo && processo.id;
+  } finally {
+    await cdp.detach();
+  }
+  if (!chromePid) throw new Error('Não foi possível identificar a janela do Chrome.');
+}
+
+async function alterarVisibilidadeChrome(ocultar) {
+  if (!browser) return;
+  await identificarProcessoChrome();
+
+  const codigo = `
+using System;
+using System.Runtime.InteropServices;
+public static class ChromeWindowVisibility {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hWnd, IntPtr updateRect, IntPtr updateRegion, uint flags);
+  public static int Set(uint targetPid, bool visible) {
+    int changed = 0;
+    EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+      uint pid;
+      GetWindowThreadProcessId(hWnd, out pid);
+      if (pid == targetPid) {
+        ShowWindowAsync(hWnd, visible ? 9 : 0);
+        if (visible) {
+          SetForegroundWindow(hWnd);
+          RedrawWindow(hWnd, IntPtr.Zero, IntPtr.Zero, 0x185);
+        }
+        changed++;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return changed;
+  }
+}`;
+  const comando = `Add-Type -TypeDefinition @'\n${codigo}\n'@; [ChromeWindowVisibility]::Set(${chromePid}, $${ocultar ? 'false' : 'true'})`;
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', comando], {
+    windowsHide: true,
+  });
+  if (parseInt(stdout.trim(), 10) < 1) throw new Error('A janela do Chrome não foi encontrada.');
+
+  if (!ocultar && page && !page.isClosed()) {
+    await sleep(200);
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { left: 100, top: 100, width: 1280, height: 800 },
+      });
+      await cdp.send('Page.bringToFront');
+    } finally {
+      await cdp.detach();
+    }
+    await page.evaluate(() => window.dispatchEvent(new Event('resize')));
+  }
+  registrarLog(`Janela do Chrome ${ocultar ? 'ocultada' : 'exibida'}.`, 'sucesso');
+}
+
+async function selecionarSelect2Valor(valor) {
+  await page.evaluate((val) => {
+    if (window.jQuery) {
+      jQuery('select[name="region_id"]').val(val).trigger('change');
+    }
+  }, valor);
+}
+
+async function buscarRecrutadorAJAX(recrutador) {
+  const recruitId = await page.evaluate(async () => {
+    try {
+      const resp = await fetch('https://amigosdofred.com.br/cadastro/indicadores?q=Professor%20Algudao');
+      const data = await resp.json();
+      if (data.results && data.results.length > 0) return data.results[0].id;
+    } catch (e) {}
+    return null;
+  });
+
+  if (!recruitId) throw new Error('Não encontrei o recrutador: ' + recrutador);
+
+  await page.evaluate((id) => {
+    if (window.jQuery) {
+      const sel = jQuery('select[name="recruiter_id"]');
+      const option = new Option('Professor Algudão', id, true, true);
+      sel.append(option).trigger('change');
+    }
+  }, recruitId);
 }
 
 async function preencherEEnviar(dados) {
   await page.goto(URL_CADASTRO, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('input[name="name"]', { timeout: 15000 });
   await page.locator('input[name="name"]').fill(dados.nome);
+  if (dados.email) await page.locator('input[name="email"]').fill(dados.email);
   await page.locator('input[name="phone"]').fill(dados.telefone);
-  await selecionarSelect2('#select2-region_id-container', 'SCIA/Estrutural');
-  await selecionarSelect2('#select2-recruiter_id-container', 'Professor Algudão');
+  await sleep(500);
+  await selecionarSelect2Valor('25');
+  await sleep(500);
+  await buscarRecrutadorAJAX('Professor Algudão');
+  await sleep(500);
   await page.locator('#lgpd_consent').check();
-  await page.locator('button:has-text("Cadastrar")').click();
+  await sleep(1000);
+  await page.locator('button[data-testid="registration-submit"]').click();
   registrarLog(`Cadastro enviado: ${dados.nome} / ${dados.telefone}.`);
 }
 
@@ -282,101 +390,8 @@ function aguardarRespostaSucesso() {
   });
 }
 
-async function executarSequenciaAleatoria(quantidade, cooldown, opcoes) {
-  usandoAleatorio = true;
-  totalAleatorio = quantidade;
-  concluidosAleatorio = 0;
-  pararSolicitado = false;
-  resultados = [];
-  temposCiclo = [];
-  ocultarChrome = opcoes.ocultarChrome || false;
-  tirarPrint = opcoes.tirarPrint || false;
-  pastaPrints = opcoes.pastaPrints || null;
-  const cooldownFinal = tirarPrint && cooldown < 6 ? 6 : cooldown;
-  sleepEntreCadastros = (cooldownFinal || 20) * 1000;
-
-  await abrirBrowser();
-
-  try {
-    for (let i = 0; i < quantidade; i++) {
-      if (pararSolicitado) {
-        registrarLog('Automação interrompida pelo usuário.', 'aviso');
-        break;
-      }
-
-      const dados = criarDadosAleatorios();
-      registroAtual = dados;
-      const restantes = quantidade - i;
-      const eta = calcularETA(restantes, cooldownFinal);
-
-      status = {
-        ativo: true,
-        mensagem: `Aleatório ${i + 1}/${quantidade} — ${dados.nome}`,
-        dados,
-        restantes,
-        progresso: { atual: i + 1, total: quantidade },
-        eta,
-      };
-      registrarLog(`Iniciando cadastro ${i + 1} de ${quantidade}.`);
-
-      inicioCiclo = Date.now();
-      try {
-        await preencherEEnviar(dados);
-        const resultado = await aguardarRespostaSucesso();
-
-        if (resultado.sucesso) {
-          concluidosAleatorio++;
-          registrarResultado(dados, 'sucesso');
-          registrarLog(`Cadastro ${i + 1}/${quantidade} concluído com sucesso.`, 'sucesso');
-          await executarScreenshot(`cadastro-${i + 1}-${dados.nome.replace(/\s+/g, '_')}`);
-        } else {
-          registrarResultado(dados, 'sem_resposta', resultado.erro);
-          registrarLog(`Cadastro ${i + 1}/${quantidade} — sem confirmação de sucesso.`, 'aviso');
-        }
-      } catch (erro) {
-        registrarResultado(dados, 'erro', erro.message);
-        registrarLog(`Erro no cadastro ${i + 1}: ${erro.message}`, 'erro');
-      }
-      temposCiclo.push(Date.now() - inicioCiclo);
-
-      if (i < quantidade - 1 && !pararSolicitado) {
-        const etaPosCooldown = calcularETA(quantidade - i - 1, cooldownFinal);
-        status = {
-          aguardando: true,
-          ativo: true,
-          mensagem: `Aguardando ${cooldownFinal}s antes do próximo cadastro… (${concluidosAleatorio}/${quantidade} concluídos)`,
-          dados: null,
-          restantes: quantidade - i - 1,
-          progresso: { atual: i + 1, total: quantidade },
-          eta: etaPosCooldown,
-        };
-        registrarLog(`Aguardando ${cooldownFinal}s antes do próximo cadastro…`);
-        await sleep(sleepEntreCadastros);
-      }
-    }
-  } finally {
-    let nomeRelatorio = null;
-    try { nomeRelatorio = gerarRelatorioHTML(); } catch (e) { registrarLog(`Erro ao gerar relatório: ${e.message}`, 'erro'); }
-
-    try { if (browser) await browser.close(); } catch (e) { registrarLog(`Erro ao fechar Chrome: ${e.message}`, 'erro'); }
-    browser = undefined;
-    page = undefined;
-
-    status = {
-      ativo: false,
-      mensagem: `Finalizado. ${concluidosAleatorio} de ${quantidade} cadastro(s) concluído(s).`,
-      dados: null,
-      restantes: 0,
-      progresso: { atual: quantidade, total: quantidade },
-      relatorio: nomeRelatorio ? { caminho: nomeRelatorio, resultados } : null,
-    };
-    registrarLog(`Sequência finalizada: ${concluidosAleatorio}/${quantidade} concluídos.`, 'sucesso');
-    usandoAleatorio = false;
-  }
-}
-
 async function executarSequenciaLista(cooldown, opcoes) {
-  if (!fila.length) throw new Error('Não há registros na fila. Carregue outro arquivo .txt.');
+  if (!fila.length) throw new Error('Não há contatos na fila. Adicione contatos na caixa de texto.');
   const total = fila.length;
   pararSolicitado = false;
   resultados = [];
@@ -478,13 +493,12 @@ async function parar() {
   if (browser) await browser.close();
   browser = undefined;
   page = undefined;
-  usandoAleatorio = false;
   temposCiclo = [];
   status = { ativo: false, mensagem: 'Automação parada.', dados: null, restantes: 0 };
   registrarLog('Automação interrompida.', 'aviso');
 }
 
-let status = { ativo: false, mensagem: 'Carregue um arquivo .txt ou gere dados aleatórios.', dados: null, restantes: 0 };
+let status = { ativo: false, mensagem: '', dados: null, restantes: 0 };
 
 function responderJson(res, codigo, corpo) {
   res.writeHead(codigo, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -518,6 +532,11 @@ const servidor = http.createServer(async (req, res) => {
         return responderJson(res, 200, status);
       }
 
+      if (req.url === '/api/carregar-texto') {
+        carregarTexto(corpo.texto, corpo.apenasNumeros);
+        return responderJson(res, 200, status);
+      }
+
       if (req.url === '/api/preparar') {
         const cooldown = parseInt(corpo.cooldown, 10) || 20;
         const opcoes = {
@@ -529,50 +548,14 @@ const servidor = http.createServer(async (req, res) => {
         return responderJson(res, 200, status);
       }
 
-      if (req.url === '/api/aleatorio') {
-        const quantidade = parseInt(corpo.quantidade, 10) || 1;
-        const cooldown = parseInt(corpo.cooldown, 10) || 20;
-        const opcoes = {
-          ocultarChrome: corpo.ocultarChrome || false,
-          tirarPrint: corpo.tirarPrint || false,
-          pastaPrints: corpo.pastaPrints || null,
-        };
-        executarSequenciaAleatoria(quantidade, cooldown, opcoes);
-        return responderJson(res, 200, status);
-      }
-
       if (req.url === '/api/parar') {
         await parar();
         return responderJson(res, 200, status);
       }
 
       if (req.url === '/api/toggle-chrome') {
-        const ocultar = corpo.ocultar;
-        ocultarChrome = ocultar;
-        if (browser) {
-          try {
-            const context = browser.contexts()[0];
-            if (context) {
-              const pages = context.pages();
-              for (const p of pages) {
-                const cdp = await p.context().newCDPSession(p);
-                if (ocultar) {
-                  await cdp.send('Browser.getWindowForTarget');
-                  await p.evaluate(() => {
-                    Object.defineProperty(document, 'hidden', { value: true });
-                  });
-                  const { windowId } = await cdp.send('Browser.getWindowForTarget');
-                  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { left: -32000, top: -32000 } });
-                } else {
-                  const { windowId } = await cdp.send('Browser.getWindowForTarget');
-                  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { left: 100, top: 100, width: 1280, height: 800 } });
-                }
-              }
-            }
-          } catch (e) {
-            registrarLog(`Erro ao ${ocultar ? 'ocultar' : 'mostrar'} Chrome: ${e.message}`, 'erro');
-          }
-        }
+        ocultarChrome = Boolean(corpo.ocultar);
+        if (browser) await alterarVisibilidadeChrome(ocultarChrome);
         return responderJson(res, 200, status);
       }
     }

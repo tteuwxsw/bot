@@ -6,25 +6,32 @@ const https = require('https');
 const { iniciarServidor, PORTA } = require('./servidor');
 
 let janela;
-let temAtualizacao = false;
-let versaoDisponivel = null;
+
+function versaoMaisNova(disponivel, atual) {
+  const partesDisponivel = disponivel.split('.').map(Number);
+  const partesAtual = atual.split('.').map(Number);
+  const tamanho = Math.max(partesDisponivel.length, partesAtual.length);
+  for (let i = 0; i < tamanho; i++) {
+    const diferenca = (partesDisponivel[i] || 0) - (partesAtual[i] || 0);
+    if (diferenca !== 0) return diferenca > 0;
+  }
+  return false;
+}
 
 function verificarAtualizacao() {
   return new Promise((resolve) => {
-    const url = 'https://raw.githubusercontent.com/tteuwxsw/bot/main/update.json';
-    const protocolo = url.startsWith('https') ? https : http;
-    
-    protocolo.get(url, (res) => {
+    const url = 'https://api.github.com/repos/tteuwxsw/bot/releases/latest';
+    https.get(url, { headers: { 'User-Agent': 'Painel-de-Preenchimento' } }, (res) => {
       let dados = '';
       res.on('data', (chunk) => { dados += chunk; });
       res.on('end', () => {
         try {
           const info = JSON.parse(dados);
           const versaoAtual = app.getVersion();
-          if (info.versao && info.versao !== versaoAtual) {
-            temAtualizacao = true;
-            versaoDisponivel = info.versao;
-            resolve({ temAtualizacao: true, versao: info.versao, url: info.url || null });
+          const versao = String(info.tag_name || '').replace(/^v/i, '');
+          const instalador = (info.assets || []).find((asset) => asset.name.toLowerCase().endsWith('.exe'));
+          if (versao && instalador && versaoMaisNova(versao, versaoAtual)) {
+            resolve({ temAtualizacao: true, versao, url: instalador.browser_download_url });
           } else {
             resolve({ temAtualizacao: false });
           }
@@ -83,6 +90,20 @@ ipcMain.handle('selecionar-arquivo-txt', async () => {
     filters: [{ name: 'Arquivo de texto', extensions: ['txt'] }],
   });
   return resultado.canceled ? null : resultado.filePaths[0];
+});
+ipcMain.handle('carregar-arquivo-contatos', async () => {
+  const resultado = await dialog.showOpenDialog(janela, {
+    title: 'Carregar contatos',
+    properties: ['openFile'],
+    filters: [{ name: 'Arquivo de texto', extensions: ['txt'] }],
+  });
+  if (resultado.canceled) return null;
+
+  const caminho = resultado.filePaths[0];
+  return {
+    nome: path.basename(caminho),
+    conteudo: fs.readFileSync(caminho, 'utf8'),
+  };
 });
 app.on('window-all-closed', () => app.quit());
 app.on('activate', () => {

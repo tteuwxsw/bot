@@ -1,32 +1,29 @@
 const statusEl = document.querySelector('#status');
 const ponto = document.querySelector('#ponto');
 const start = document.querySelector('#start');
-const aleatorioBtn = document.querySelector('#aleatorio');
 const logsEl = document.querySelector('#logs');
 const contadorLog = document.querySelector('#contador-log');
-const modal = document.querySelector('#modal');
-const quantidadeInput = document.querySelector('#quantidade');
-const cooldownInput = document.querySelector('#cooldown');
-const modalConfirmar = document.querySelector('#modal-confirmar');
-const modalCancelar = document.querySelector('#modal-cancelar');
 const modalLista = document.querySelector('#modal-lista');
 const cooldownListaInput = document.querySelector('#cooldown-lista');
 const modalListaConfirmar = document.querySelector('#modal-lista-confirmar');
 const modalListaCancelar = document.querySelector('#modal-lista-cancelar');
 const baixarRelatorioBtn = document.querySelector('#baixar-relatorio');
+const contatosContainer = document.querySelector('#contatos-container');
+const contatosContador = document.querySelector('#contatos-contador');
+const contatosFormato = document.querySelector('#contatos-formato');
+const quantidadeListaInput = document.querySelector('#quantidade-lista');
+const apenasNumerosCheck = document.querySelector('#apenas-numeros');
+const ordenarBtn = document.querySelector('#ordenar-contatos');
+const carregarContatosBtn = document.querySelector('#carregar-contatos');
+const arquivoContatosStatus = document.querySelector('#arquivo-contatos-status');
 
 const ocultarChrome = document.querySelector('#ocultar-chrome');
-const tirarPrintAleatorio = document.querySelector('#tirar-print-aleatorio');
-const pastaPrintAleatorio = document.querySelector('#pasta-print-aleatorio');
-const selecionarPastaAleatorio = document.querySelector('#selecionar-pasta-aleatorio');
-const pastaSelecionadaAleatorio = document.querySelector('#pasta-selecionada-aleatorio');
 
 const tirarPrintLista = document.querySelector('#tirar-print-lista');
 const pastaPrintLista = document.querySelector('#pasta-print-lista');
 const selecionarPastaLista = document.querySelector('#selecionar-pasta-lista');
 const pastaSelecionadaLista = document.querySelector('#pasta-selecionada-lista');
 
-let pastaPrintsAleatorio = null;
 let pastaPrintsLista = null;
 
 ocultarChrome.addEventListener('change', async () => {
@@ -41,24 +38,9 @@ function atualizarCooldownMinimo(input, tirarPrintChecked) {
   input.min = tirarPrintChecked ? 6 : 5;
 }
 
-tirarPrintAleatorio.addEventListener('change', () => {
-  pastaPrintAleatorio.style.display = tirarPrintAleatorio.checked ? 'block' : 'none';
-  atualizarCooldownMinimo(cooldownInput, tirarPrintAleatorio.checked);
-});
-
 tirarPrintLista.addEventListener('change', () => {
   pastaPrintLista.style.display = tirarPrintLista.checked ? 'block' : 'none';
   atualizarCooldownMinimo(cooldownListaInput, tirarPrintLista.checked);
-});
-
-selecionarPastaAleatorio.addEventListener('click', async () => {
-  if (!window.painelLocal || !window.painelLocal.selecionarPasta) return;
-  const pasta = await window.painelLocal.selecionarPasta();
-  if (pasta) {
-    pastaPrintsAleatorio = pasta;
-    pastaSelecionadaAleatorio.textContent = pasta;
-    pastaSelecionadaAleatorio.classList.remove('sem-pasta');
-  }
 });
 
 selecionarPastaLista.addEventListener('click', async () => {
@@ -69,6 +51,184 @@ selecionarPastaLista.addEventListener('click', async () => {
     pastaSelecionadaLista.textContent = pasta;
     pastaSelecionadaLista.classList.remove('sem-pasta');
   }
+});
+
+function getMaxContatos() {
+  return parseInt(quantidadeListaInput.value, 10) || 1;
+}
+
+function criarLinhaContato(numero, valor = '') {
+  const linha = document.createElement('div');
+  const marcador = document.createElement('span');
+  const campo = document.createElement('input');
+  linha.className = 'contatos-linha';
+  marcador.className = 'contatos-numero';
+  marcador.textContent = `${numero}:`;
+  campo.type = 'text';
+  campo.className = 'contatos-campo';
+  campo.value = valor;
+  campo.placeholder = apenasNumerosCheck.checked ? '(00) 00000-0000' : 'Nome | Telefone';
+  linha.append(marcador, campo);
+  return linha;
+}
+
+function gerarCampos(quantidade, valores = []) {
+  contatosContainer.innerHTML = '';
+  for (let i = 1; i <= quantidade; i++) {
+    contatosContainer.appendChild(criarLinhaContato(i, valores[i - 1] || ''));
+  }
+  contarContatos();
+}
+
+function contarContatos() {
+  const campos = contatosContainer.querySelectorAll('.contatos-campo');
+  let preenchidos = 0;
+  campos.forEach(c => { if (c.value.trim().length > 0) preenchidos++; });
+  contatosContador.textContent = `${preenchidos} / ${campos.length} contato(s)`;
+}
+
+function pegarContatos() {
+  const campos = contatosContainer.querySelectorAll('.contatos-campo');
+  const contatos = [];
+  campos.forEach(c => {
+    const v = c.value.trim();
+    if (v.length > 0) contatos.push(v);
+  });
+  return contatos.join('\n');
+}
+
+function atualizarPlaceholder() {
+  if (apenasNumerosCheck.checked) {
+    contatosFormato.innerHTML = 'Formato: <code>Só o telefone</code>';
+  } else {
+    contatosFormato.innerHTML = 'Formato: <code>Nome | Telefone</code>';
+  }
+  contatosContainer.querySelectorAll('.contatos-campo').forEach(c => {
+    c.placeholder = apenasNumerosCheck.checked ? '(00) 00000-0000' : 'Nome | Telefone';
+  });
+}
+
+quantidadeListaInput.addEventListener('input', () => {
+  const max = getMaxContatos();
+  const camposAtuais = contatosContainer.querySelectorAll('.contatos-campo');
+  const valores = [];
+  camposAtuais.forEach(c => valores.push(c.value));
+  gerarCampos(max, valores);
+  arquivoContatosStatus.textContent = '';
+});
+
+apenasNumerosCheck.addEventListener('change', () => {
+  atualizarPlaceholder();
+});
+
+contatosContainer.addEventListener('input', () => {
+  contarContatos();
+});
+
+contatosContainer.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const campos = [...contatosContainer.querySelectorAll('.contatos-campo')];
+    const idx = campos.indexOf(document.activeElement);
+    if (idx >= 0 && idx < campos.length - 1) {
+      campos[idx + 1].focus();
+    }
+  }
+});
+
+function organizarContatos() {
+  const campos = contatosContainer.querySelectorAll('.contatos-campo');
+  const valores = [];
+  campos.forEach(c => valores.push(c.value.trim()));
+  const preenchidos = valores.filter(v => v.length > 0);
+
+  function formatarTelefone(telefone) {
+    const digitos = telefone.replace(/\D/g, '').slice(-11);
+    if (digitos.length === 11) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 7)}-${digitos.slice(7)}`;
+    if (digitos.length === 10) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 6)}-${digitos.slice(6)}`;
+    return null;
+  }
+
+  let resultado;
+  if (apenasNumerosCheck.checked) {
+    resultado = preenchidos
+      .map(formatarTelefone)
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  } else {
+    const telefoneNoFim = /(\(?\d{2}\)?[\s.-]*\d{4,5}[\s.-]*\d{4})\s*$/;
+    const validos = [];
+    const invalidos = [];
+
+    preenchidos.forEach((valor) => {
+      const telefoneEncontrado = valor.match(telefoneNoFim);
+      if (!telefoneEncontrado) {
+        invalidos.push(valor);
+        return;
+      }
+
+      const telefone = formatarTelefone(telefoneEncontrado[1]);
+      const nome = valor
+        .slice(0, telefoneEncontrado.index)
+        .replace(/[\s|:;,-]+$/, '')
+        .trim();
+
+      if (!nome || !telefone) {
+        invalidos.push(valor);
+        return;
+      }
+
+      validos.push({ nome, telefone });
+    });
+
+    validos.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+    resultado = validos.map(({ nome, telefone }) => `${nome} | ${telefone}`).concat(invalidos);
+  }
+
+  campos.forEach((c, i) => { c.value = resultado[i] || ''; });
+  contarContatos();
+}
+
+ordenarBtn.addEventListener('click', organizarContatos);
+
+carregarContatosBtn.addEventListener('click', async () => {
+  if (!window.painelLocal || !window.painelLocal.carregarArquivoContatos) return;
+  arquivoContatosStatus.textContent = '';
+  arquivoContatosStatus.className = 'arquivo-contatos-status';
+
+  const arquivo = await window.painelLocal.carregarArquivoContatos();
+  if (!arquivo) return;
+
+  const linhas = arquivo.conteudo.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!linhas.length || linhas.length > 500) {
+    arquivoContatosStatus.textContent = linhas.length > 500
+      ? 'O arquivo pode ter no máximo 500 contatos.'
+      : 'O arquivo está vazio.';
+    arquivoContatosStatus.classList.add('erro');
+    return;
+  }
+
+  const telefoneNoFim = /(\(?\d{2}\)?[\s.-]*\d{4,5}[\s.-]*\d{4})\s*$/;
+  const erroNaLinha = linhas.findIndex((linha) => {
+    const telefone = linha.match(telefoneNoFim);
+    if (!telefone) return true;
+    const nome = linha.slice(0, telefone.index).replace(/[\s|:;,-]+$/, '').trim();
+    return apenasNumerosCheck.checked ? nome.length > 0 : nome.length === 0;
+  });
+
+  if (erroNaLinha >= 0) {
+    arquivoContatosStatus.textContent = apenasNumerosCheck.checked
+      ? `Linha ${erroNaLinha + 1}: o modo “Apenas números” não aceita nomes.`
+      : `Linha ${erroNaLinha + 1}: informe Nome | Telefone ou marque “Apenas números”.`;
+    arquivoContatosStatus.classList.add('erro');
+    return;
+  }
+
+  quantidadeListaInput.value = linhas.length;
+  gerarCampos(linhas.length, linhas);
+  organizarContatos();
+  arquivoContatosStatus.textContent = `${arquivo.nome}: ${linhas.length} contato(s) carregado(s).`;
+  arquivoContatosStatus.classList.add('sucesso');
 });
 
 baixarRelatorioBtn.addEventListener('click', async () => {
@@ -87,12 +247,12 @@ baixarRelatorioBtn.addEventListener('click', async () => {
 
 function mostrarStatus(status) {
   statusEl.textContent = status.mensagem;
+  statusEl.style.display = status.mensagem ? 'block' : 'none';
   ponto.classList.toggle('ativo', status.ativo);
   start.disabled = status.ativo;
   start.textContent = status.ativo ? 'Processando…' : '▶ Iniciar com lista';
-  aleatorioBtn.disabled = status.ativo;
+
   if (!status.ativo) {
-    aleatorioBtn.textContent = '🎲 Iniciar sem lista';
     baixarRelatorioBtn.style.display = 'none';
   }
 
@@ -117,19 +277,15 @@ async function chamar(url, corpo) {
   return status;
 }
 
-document.querySelector('#selecionar').addEventListener('click', async () => {
-  if (!window.painelLocal) {
-    mostrarStatus({ ativo: false, mensagem: 'Abra pelo aplicativo instalado para selecionar a lista.' });
-    return;
-  }
-  const caminho = await window.painelLocal.selecionarArquivo();
-  if (caminho) await chamar('/api/carregar', { caminho });
-});
-
 start.addEventListener('click', () => {
+  quantidadeListaInput.value = 1;
+  contatosFormato.innerHTML = 'Formato: <code>Nome | Telefone</code>';
+  apenasNumerosCheck.checked = false;
+  arquivoContatosStatus.textContent = '';
+  gerarCampos(1);
   cooldownListaInput.value = 20;
   modalLista.style.display = 'flex';
-  cooldownListaInput.focus();
+  quantidadeListaInput.focus();
 });
 
 modalListaCancelar.addEventListener('click', () => {
@@ -141,6 +297,18 @@ modalLista.addEventListener('click', (e) => {
 });
 
 modalListaConfirmar.addEventListener('click', async () => {
+  const texto = pegarContatos();
+  const preenchidos = texto ? texto.split(/\r?\n/).length : 0;
+  if (preenchidos !== getMaxContatos()) {
+    arquivoContatosStatus.textContent = `Preencha os ${getMaxContatos()} contatos antes de iniciar.`;
+    arquivoContatosStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  const resultado = await chamar('/api/carregar-texto', {
+    texto,
+    apenasNumeros: apenasNumerosCheck.checked,
+  });
+  if (resultado.erro) return;
   const cooldown = parseInt(cooldownListaInput.value, 10) || 20;
   const opcoes = {
     ocultarChrome: ocultarChrome.checked,
@@ -152,37 +320,6 @@ modalListaConfirmar.addEventListener('click', async () => {
   start.textContent = 'Preparando…';
   baixarRelatorioBtn.style.display = 'none';
   await chamar('/api/preparar', { cooldown, ...opcoes });
-});
-
-aleatorioBtn.addEventListener('click', () => {
-  quantidadeInput.value = 1;
-  cooldownInput.value = 20;
-  modal.style.display = 'flex';
-  quantidadeInput.focus();
-});
-
-modalCancelar.addEventListener('click', () => {
-  modal.style.display = 'none';
-});
-
-modal.addEventListener('click', (e) => {
-  if (e.target === modal) modal.style.display = 'none';
-});
-
-modalConfirmar.addEventListener('click', async () => {
-  const quantidade = parseInt(quantidadeInput.value, 10);
-  const cooldown = parseInt(cooldownInput.value, 10) || 20;
-  if (!quantidade || quantidade < 1) return;
-  const opcoes = {
-    ocultarChrome: ocultarChrome.checked,
-    tirarPrint: tirarPrintAleatorio.checked,
-    pastaPrints: pastaPrintsAleatorio,
-  };
-  modal.style.display = 'none';
-  baixarRelatorioBtn.style.display = 'none';
-  aleatorioBtn.disabled = true;
-  aleatorioBtn.textContent = `Processando 0/${quantidade}…`;
-  await chamar('/api/aleatorio', { quantidade, cooldown, ...opcoes });
 });
 
 document.querySelector('#stop').addEventListener('click', () => chamar('/api/parar'));
