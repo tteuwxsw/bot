@@ -191,8 +191,10 @@ function carregarDados(caminho) {
   if (path.extname(caminho).toLowerCase() !== '.txt') throw new Error('Selecione um arquivo .txt.');
   const linhas = fs.readFileSync(caminho, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const novosDados = linhas.map((linha, i) => {
-    const [nome, telefone] = linha.split('|').map((p) => p.trim());
-    if (!nome || !telefone) throw new Error(`Linha ${i + 1}: use o formato Nome | Telefone.`);
+    const [nome, telefoneRaw] = linha.split('|').map((p) => p.trim());
+    if (!nome || !telefoneRaw) throw new Error(`Linha ${i + 1}: use o formato Nome | Telefone.`);
+    const telefone = formatarTelefone(telefoneRaw);
+    if (!telefone) throw new Error(`Linha ${i + 1}: telefone inválido.`);
     return { nome, telefone };
   });
   if (!novosDados.length) throw new Error('O arquivo não possui dados válidos.');
@@ -200,6 +202,17 @@ function carregarDados(caminho) {
   arquivoOriginal = caminho;
   registrarLog(`${fila.length} registro(s) adicionados à fila.`, 'sucesso');
   status = { ativo: false, mensagem: `${fila.length} registro(s) carregado(s).`, dados: null, restantes: fila.length };
+}
+
+function formatarTelefone(telefone) {
+  let digitos = telefone.replace(/\D/g, '').slice(-11);
+  if (digitos.length === 10) {
+    const terceiro = parseInt(digitos[2], 10);
+    if (terceiro >= 6) digitos = digitos.slice(0, 2) + '9' + digitos.slice(2);
+  }
+  if (digitos.length === 11) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 7)}-${digitos.slice(7)}`;
+  if (digitos.length === 10) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 6)}-${digitos.slice(6)}`;
+  return null;
 }
 
 function carregarTexto(texto, apenasNumeros) {
@@ -212,11 +225,15 @@ function carregarTexto(texto, apenasNumeros) {
       const telefone = linha.replace(/\D/g, '');
       if (telefone.length < 10) throw new Error(`Linha ${i + 1}: telefone inválido.`);
       const nome = gerarNomeAleatorio();
-      return { nome, telefone: linha.trim() };
+      const formatado = formatarTelefone(telefone);
+      if (!formatado) throw new Error(`Linha ${i + 1}: telefone inválido.`);
+      return { nome, telefone: formatado };
     }
-    const [nome, telefone] = linha.split('|').map((p) => p.trim());
-    if (!nome || !telefone) throw new Error(`Linha ${i + 1}: use o formato Nome | Telefone.`);
-    return { nome, telefone };
+    const [nome, telefoneRaw] = linha.split('|').map((p) => p.trim());
+    if (!nome || !telefoneRaw) throw new Error(`Linha ${i + 1}: use o formato Nome | Telefone.`);
+    const formatado = formatarTelefone(telefoneRaw);
+    if (!formatado) throw new Error(`Linha ${i + 1}: telefone inválido.`);
+    return { nome, telefone: formatado };
   });
   if (!novosDados.length) throw new Error('Nenhum contato válido encontrado.');
   fila = novosDados;

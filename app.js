@@ -143,7 +143,11 @@ function organizarContatos() {
   const preenchidos = valores.filter(v => v.length > 0);
 
   function formatarTelefone(telefone) {
-    const digitos = telefone.replace(/\D/g, '').slice(-11);
+    let digitos = telefone.replace(/\D/g, '').slice(-11);
+    if (digitos.length === 10) {
+      const terceiro = parseInt(digitos[2], 10);
+      if (terceiro >= 6) digitos = digitos.slice(0, 2) + '9' + digitos.slice(2);
+    }
     if (digitos.length === 11) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 7)}-${digitos.slice(7)}`;
     if (digitos.length === 10) return `(${digitos.slice(0, 2)}) ${digitos.slice(2, 6)}-${digitos.slice(6)}`;
     return null;
