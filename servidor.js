@@ -26,6 +26,10 @@ let inicioCiclo = null;
 let ocultarChrome = false;
 let tirarPrint = false;
 let pastaPrints = null;
+let organizarPrints = false;
+let printsPorPasta = 10;
+let printsSalvos = 0;
+let pastaSessaoPrints = null;
 
 const PRIMEIROS_NOMES = [
   'Ana','Maria','Juliana','Fernanda','Patricia','Camila','Amanda','Bruna',
@@ -98,12 +102,35 @@ function formatarDuracao(ms) {
   return `${s}s`;
 }
 
+function criarPastaSessaoPrints() {
+  const agora = new Date();
+  const pad = (valor) => String(valor).padStart(2, '0');
+  const prefixo = `prints-${agora.getFullYear()}-${pad(agora.getMonth() + 1)}-${pad(agora.getDate())}_${pad(agora.getHours())}-${pad(agora.getMinutes())}-${pad(agora.getSeconds())}`;
+  let destino = path.join(pastaPrints, prefixo);
+  let sufixo = 2;
+  while (fs.existsSync(destino)) {
+    destino = path.join(pastaPrints, `${prefixo}-${sufixo}`);
+    sufixo++;
+  }
+  fs.mkdirSync(destino, { recursive: true });
+  return destino;
+}
+
 async function executarScreenshot(nomeArquivo) {
   if (!tirarPrint || !pastaPrints || !page) return;
   try {
-    const caminho = path.join(pastaPrints, `${nomeArquivo}.png`);
+    let pastaDestino = pastaPrints;
+    if (organizarPrints) {
+      const numeroPasta = Math.floor(printsSalvos / printsPorPasta) + 1;
+      pastaDestino = path.join(pastaSessaoPrints, `Pasta ${String(numeroPasta).padStart(2, '0')}`);
+      fs.mkdirSync(pastaDestino, { recursive: true });
+    }
+    const nomeSeguro = nomeArquivo.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+    const caminho = path.join(pastaDestino, `${nomeSeguro}.png`);
     await page.screenshot({ path: caminho, fullPage: true });
-    registrarLog(`Print salvo: ${nomeArquivo}.png`, 'sucesso');
+    printsSalvos++;
+    const pastaLog = organizarPrints ? `${path.basename(pastaDestino)}/` : '';
+    registrarLog(`Print salvo: ${pastaLog}${nomeSeguro}.png`, 'sucesso');
   } catch (erro) {
     registrarLog(`Erro ao tirar print: ${erro.message}`, 'erro');
   }
@@ -416,6 +443,18 @@ async function executarSequenciaLista(cooldown, opcoes) {
   ocultarChrome = opcoes.ocultarChrome || false;
   tirarPrint = opcoes.tirarPrint || false;
   pastaPrints = opcoes.pastaPrints || null;
+  organizarPrints = tirarPrint && Boolean(opcoes.organizarPrints);
+  printsPorPasta = Math.max(1, parseInt(opcoes.printsPorPasta, 10) || 10);
+  printsSalvos = 0;
+  pastaSessaoPrints = null;
+  if (tirarPrint) {
+    if (!pastaPrints) throw new Error('Selecione uma pasta para salvar os prints.');
+    fs.mkdirSync(pastaPrints, { recursive: true });
+    if (organizarPrints) {
+      pastaSessaoPrints = criarPastaSessaoPrints();
+      registrarLog(`Prints organizados em ${pastaSessaoPrints}, com até ${printsPorPasta} por pasta.`);
+    }
+  }
   const cooldownFinal = tirarPrint && cooldown < 6 ? 6 : cooldown;
   sleepEntreCadastros = (cooldownFinal || 20) * 1000;
 
@@ -560,8 +599,13 @@ const servidor = http.createServer(async (req, res) => {
           ocultarChrome: corpo.ocultarChrome || false,
           tirarPrint: corpo.tirarPrint || false,
           pastaPrints: corpo.pastaPrints || null,
+          organizarPrints: corpo.organizarPrints || false,
+          printsPorPasta: corpo.printsPorPasta,
         };
-        executarSequenciaLista(cooldown, opcoes);
+        executarSequenciaLista(cooldown, opcoes).catch((erro) => {
+          status = { ativo: false, mensagem: `Erro: ${erro.message}`, dados: null, restantes: fila.length };
+          registrarLog(`Erro na automação: ${erro.message}`, 'erro');
+        });
         return responderJson(res, 200, status);
       }
 

@@ -23,6 +23,10 @@ const tirarPrintLista = document.querySelector('#tirar-print-lista');
 const pastaPrintLista = document.querySelector('#pasta-print-lista');
 const selecionarPastaLista = document.querySelector('#selecionar-pasta-lista');
 const pastaSelecionadaLista = document.querySelector('#pasta-selecionada-lista');
+const organizarPrintsLista = document.querySelector('#organizar-prints-lista');
+const configOrganizarPrints = document.querySelector('#config-organizar-prints');
+const printsPorPastaInput = document.querySelector('#prints-por-pasta');
+const resumoOrganizarPrints = document.querySelector('#resumo-organizar-prints');
 
 let pastaPrintsLista = null;
 
@@ -40,8 +44,30 @@ function atualizarCooldownMinimo(input, tirarPrintChecked) {
 
 tirarPrintLista.addEventListener('change', () => {
   pastaPrintLista.style.display = tirarPrintLista.checked ? 'block' : 'none';
+  if (!tirarPrintLista.checked) {
+    organizarPrintsLista.checked = false;
+    configOrganizarPrints.style.display = 'none';
+  }
   atualizarCooldownMinimo(cooldownListaInput, tirarPrintLista.checked);
 });
+
+function atualizarResumoOrganizacao() {
+  const porPasta = parseInt(printsPorPastaInput.value, 10);
+  if (!Number.isInteger(porPasta) || porPasta < 1) {
+    resumoOrganizarPrints.textContent = 'Informe uma quantidade válida.';
+    return;
+  }
+  const total = getMaxContatos();
+  const pastas = Math.ceil(total / porPasta);
+  resumoOrganizarPrints.textContent = `${total} print(s): até ${pastas} pasta(s), com ${porPasta} em cada.`;
+}
+
+organizarPrintsLista.addEventListener('change', () => {
+  configOrganizarPrints.style.display = organizarPrintsLista.checked ? 'grid' : 'none';
+  atualizarResumoOrganizacao();
+});
+
+printsPorPastaInput.addEventListener('input', atualizarResumoOrganizacao);
 
 selecionarPastaLista.addEventListener('click', async () => {
   if (!window.painelLocal || !window.painelLocal.selecionarPasta) return;
@@ -115,6 +141,7 @@ quantidadeListaInput.addEventListener('input', () => {
   camposAtuais.forEach(c => valores.push(c.value));
   gerarCampos(max, valores);
   arquivoContatosStatus.textContent = '';
+  atualizarResumoOrganizacao();
 });
 
 apenasNumerosCheck.addEventListener('change', () => {
@@ -288,6 +315,16 @@ start.addEventListener('click', () => {
   arquivoContatosStatus.textContent = '';
   gerarCampos(1);
   cooldownListaInput.value = 20;
+  tirarPrintLista.checked = false;
+  pastaPrintLista.style.display = 'none';
+  pastaPrintsLista = null;
+  pastaSelecionadaLista.textContent = 'Nenhuma pasta selecionada';
+  pastaSelecionadaLista.classList.add('sem-pasta');
+  organizarPrintsLista.checked = false;
+  configOrganizarPrints.style.display = 'none';
+  printsPorPastaInput.value = 10;
+  atualizarCooldownMinimo(cooldownListaInput, false);
+  atualizarResumoOrganizacao();
   modalLista.style.display = 'flex';
   quantidadeListaInput.focus();
 });
@@ -308,6 +345,17 @@ modalListaConfirmar.addEventListener('click', async () => {
     arquivoContatosStatus.className = 'arquivo-contatos-status erro';
     return;
   }
+  if (tirarPrintLista.checked && !pastaPrintsLista) {
+    arquivoContatosStatus.textContent = 'Selecione a pasta onde os prints serão salvos.';
+    arquivoContatosStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  const printsPorPasta = parseInt(printsPorPastaInput.value, 10);
+  if (organizarPrintsLista.checked && (!Number.isInteger(printsPorPasta) || printsPorPasta < 1 || printsPorPasta > 500)) {
+    arquivoContatosStatus.textContent = 'Informe entre 1 e 500 prints por pasta.';
+    arquivoContatosStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
   const resultado = await chamar('/api/carregar-texto', {
     texto,
     apenasNumeros: apenasNumerosCheck.checked,
@@ -318,6 +366,8 @@ modalListaConfirmar.addEventListener('click', async () => {
     ocultarChrome: ocultarChrome.checked,
     tirarPrint: tirarPrintLista.checked,
     pastaPrints: pastaPrintsLista,
+    organizarPrints: organizarPrintsLista.checked,
+    printsPorPasta,
   };
   modalLista.style.display = 'none';
   start.disabled = true;

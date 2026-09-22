@@ -64,7 +64,16 @@
           </div>
           <div id="pasta-print-lista" class="modal-pasta" style="display:none">
             <button id="selecionar-pasta-lista" class="arquivo-botao" type="button">📁 Selecionar pasta para prints</button>
-            <span id="pasta-selecionada-lista" class="pasta-selecionada">Nenhuma pasta selecionada</span>
+            <span id="pasta-selecionada-lista" class="pasta-selecionada sem-pasta">Nenhuma pasta selecionada</span>
+            <div class="modal-checkbox organizar-prints-opcao">
+              <input id="organizar-prints-lista" type="checkbox">
+              <label for="organizar-prints-lista">Separar prints em pastas</label>
+            </div>
+            <div id="config-organizar-prints" class="organizar-prints-config" style="display:none">
+              <label for="prints-por-pasta" class="modal-label">Quantidade de prints em cada pasta</label>
+              <input id="prints-por-pasta" type="number" min="1" max="500" value="10" class="modal-input">
+              <span id="resumo-organizar-prints" class="ajuda"></span>
+            </div>
           </div>
           <label class="modal-label">Cooldown entre cadastros (segundos)</label>
           <input id="cooldown-lista" type="number" min="5" max="300" value="20" class="modal-input">
