@@ -46,7 +46,7 @@ function verificarAtualizacao() {
 }
 
 async function criarJanela() {
-  await iniciarServidor();
+  await iniciarServidor(process.env.PAINEL_DADOS_DIR || app.getPath('userData'));
 
   janela = new BrowserWindow({
     width: 1060,
@@ -103,6 +103,18 @@ ipcMain.handle('carregar-arquivo-contatos', async () => {
   return {
     nome: path.basename(caminho),
     conteudo: fs.readFileSync(caminho, 'utf8'),
+  };
+});
+ipcMain.handle('selecionar-video-contatos', async () => {
+  const resultado = await dialog.showOpenDialog(janela, {
+    title: 'Selecione a gravação com os contatos',
+    properties: ['openFile'],
+    filters: [{ name: 'Vídeo MP4', extensions: ['mp4'] }],
+  });
+  if (resultado.canceled) return null;
+  return {
+    caminho: resultado.filePaths[0],
+    nome: path.basename(resultado.filePaths[0]),
   };
 });
 app.on('window-all-closed', () => app.quit());

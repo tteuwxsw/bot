@@ -1,8 +1,10 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const os = require('os');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
+const { DatabaseSync } = require('node:sqlite');
 const { chromium } = require('playwright');
 
 const execFileAsync = promisify(execFile);
@@ -30,6 +32,253 @@ let organizarPrints = false;
 let printsPorPasta = 10;
 let printsSalvos = 0;
 let pastaSessaoPrints = null;
+let bancoContatos;
+let diretorioDados;
+let importacaoVideo = {
+  ativo: false,
+  etapa: '',
+  progresso: 0,
+  mensagem: '',
+  encontrados: 0,
+  adicionados: 0,
+  erro: null,
+};
+const processosAuxiliares = new Set();
+const pastasTemporarias = new Set();
+
+process.on('exit', () => {
+  for (const processo of processosAuxiliares) processo.kill();
+  for (const pasta of pastasTemporarias) fs.rmSync(pasta, { recursive: true, force: true });
+});
+
+function inicializarBancoContatos(diretorio) {
+  diretorioDados = diretorio || path.join(__dirname, 'dados');
+  fs.mkdirSync(diretorioDados, { recursive: true });
+  bancoContatos = new DatabaseSync(path.join(diretorioDados, 'contatos.sqlite'));
+  bancoContatos.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS contatos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telefone TEXT NOT NULL UNIQUE,
+      origem TEXT NOT NULL,
+      importado_em TEXT NOT NULL,
+      usado_em TEXT
+    );
+  `);
+}
+
+function normalizarTelefone61(valor) {
+  let digitos = String(valor || '').replace(/\D/g, '');
+  if ((digitos.length === 12 || digitos.length === 13) && digitos.startsWith('55')) {
+    digitos = digitos.slice(2);
+  }
+  if (!digitos.startsWith('61') || (digitos.length !== 10 && digitos.length !== 11)) return null;
+  if (digitos.length === 10 && Number(digitos[2]) >= 6) {
+    digitos = `${digitos.slice(0, 2)}9${digitos.slice(2)}`;
+  }
+  if (digitos.length === 11 && digitos[2] !== '9') return null;
+  return digitos;
+}
+
+function formatarTelefoneBanco(telefone) {
+  if (telefone.length === 11) return `(${telefone.slice(0, 2)}) ${telefone.slice(2, 7)}-${telefone.slice(7)}`;
+  return `(${telefone.slice(0, 2)}) ${telefone.slice(2, 6)}-${telefone.slice(6)}`;
+}
+
+function listarContatosSalvos() {
+  if (!bancoContatos) return { disponiveis: [], usados: 0 };
+  const totalDisponiveis = bancoContatos.prepare('SELECT COUNT(*) AS total FROM contatos WHERE usado_em IS NULL').get().total;
+  const disponiveis = bancoContatos.prepare(`
+    SELECT id, telefone, origem, importado_em
+    FROM contatos
+    WHERE usado_em IS NULL
+    ORDER BY id
+    LIMIT 500
+  `).all().map((contato) => ({ ...contato, formatado: formatarTelefoneBanco(contato.telefone) }));
+  const usados = bancoContatos.prepare('SELECT COUNT(*) AS total FROM contatos WHERE usado_em IS NOT NULL').get().total;
+  return { disponiveis, totalDisponiveis, usados };
+}
+
+function marcarContatoUsado(telefone) {
+  if (!bancoContatos) return;
+  const normalizado = normalizarTelefone61(telefone);
+  if (!normalizado) return;
+  bancoContatos.prepare(`
+    UPDATE contatos
+    SET usado_em = COALESCE(usado_em, ?)
+    WHERE telefone = ?
+  `).run(new Date().toISOString(), normalizado);
+}
+
+function caminhoForaDoAsar(caminho) {
+  const trechoAsar = `${path.sep}app.asar${path.sep}`;
+  return caminho.includes(trechoAsar) ? caminho.replace(trechoAsar, `${path.sep}app.asar.unpacked${path.sep}`) : caminho;
+}
+
+function executarFFmpeg(argumentos) {
+  const ffmpeg = caminhoForaDoAsar(require('ffmpeg-static'));
+  return new Promise((resolve, reject) => {
+    const processo = spawn(ffmpeg, argumentos, { windowsHide: true });
+    processosAuxiliares.add(processo);
+    let erros = '';
+    processo.stderr.on('data', (parte) => {
+      erros = `${erros}${parte}`.slice(-4000);
+    });
+    processo.on('error', reject);
+    processo.on('close', (codigo) => {
+      processosAuxiliares.delete(processo);
+      if (codigo === 0) resolve();
+      else reject(new Error(`Não foi possível ler o vídeo (FFmpeg ${codigo}). ${erros.slice(-500)}`));
+    });
+  });
+}
+
+function obterDuracaoVideo(caminhoVideo) {
+  const ffmpeg = caminhoForaDoAsar(require('ffmpeg-static'));
+  return new Promise((resolve, reject) => {
+    const processo = spawn(ffmpeg, ['-hide_banner', '-i', caminhoVideo], { windowsHide: true });
+    processosAuxiliares.add(processo);
+    let saida = '';
+    processo.stderr.on('data', (parte) => {
+      saida = `${saida}${parte}`.slice(-12000);
+    });
+    processo.on('error', reject);
+    processo.on('close', () => {
+      processosAuxiliares.delete(processo);
+      const correspondencia = saida.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/i);
+      if (!correspondencia) return reject(new Error('Não foi possível identificar a duração do vídeo.'));
+      const segundos = Number(correspondencia[1]) * 3600 + Number(correspondencia[2]) * 60 + Number(correspondencia[3]);
+      resolve(segundos);
+    });
+  });
+}
+
+function executarOCRQuadros(pastaQuadros) {
+  const script = caminhoForaDoAsar(path.join(__dirname, 'ocr-video-worker.js'));
+  const nodePath = path.join(__dirname, 'node_modules');
+  return new Promise((resolve, reject) => {
+    const processo = spawn(process.execPath, [script, pastaQuadros], {
+      windowsHide: true,
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        NODE_PATH: [nodePath, process.env.NODE_PATH].filter(Boolean).join(path.delimiter),
+      },
+    });
+    processosAuxiliares.add(processo);
+    let buffer = '';
+    let erros = '';
+    let resultado;
+
+    function processarLinha(linha) {
+      if (!linha.trim().startsWith('{')) return;
+      try {
+        const evento = JSON.parse(linha);
+        if (evento.tipo === 'progresso') {
+          importacaoVideo.progresso = 10 + Math.round((evento.atual / evento.total) * 85);
+          importacaoVideo.encontrados = evento.encontrados;
+          importacaoVideo.mensagem = `Lendo imagem ${evento.atual} de ${evento.total}…`;
+        } else if (evento.tipo === 'resultado') {
+          resultado = evento.telefones;
+        }
+      } catch {}
+    }
+
+    processo.stdout.on('data', (parte) => {
+      buffer += parte.toString();
+      const linhas = buffer.split(/\r?\n/);
+      buffer = linhas.pop();
+      linhas.forEach(processarLinha);
+    });
+    processo.stderr.on('data', (parte) => {
+      erros = `${erros}${parte}`.slice(-4000);
+    });
+    processo.on('error', reject);
+    processo.on('close', (codigo) => {
+      processosAuxiliares.delete(processo);
+      if (buffer) processarLinha(buffer);
+      if (codigo === 0 && resultado) resolve(resultado);
+      else reject(new Error(`Falha no reconhecimento dos números. ${erros.slice(-800)}`));
+    });
+  });
+}
+
+async function processarVideoContatos(caminhoVideo) {
+  if (importacaoVideo.ativo) throw new Error('Já existe um vídeo sendo analisado.');
+  if (!caminhoVideo || path.extname(caminhoVideo).toLowerCase() !== '.mp4' || !fs.existsSync(caminhoVideo)) {
+    throw new Error('Selecione um arquivo MP4 válido.');
+  }
+
+  const pastaTemporaria = fs.mkdtempSync(path.join(os.tmpdir(), 'painel-ocr-'));
+  pastasTemporarias.add(pastaTemporaria);
+  importacaoVideo = {
+    ativo: true,
+    etapa: 'quadros',
+    progresso: 2,
+    mensagem: 'Extraindo imagens do vídeo…',
+    encontrados: 0,
+    adicionados: 0,
+    erro: null,
+  };
+
+  try {
+    const duracao = await obterDuracaoVideo(caminhoVideo);
+    if (duracao > 900) throw new Error('O vídeo pode ter no máximo 15 minutos.');
+    await executarFFmpeg([
+      '-hide_banner', '-loglevel', 'error', '-i', caminhoVideo,
+      '-t', '900', '-vf', 'fps=2,scale=1600:-2:force_original_aspect_ratio=decrease',
+      '-q:v', '3', path.join(pastaTemporaria, 'quadro-%06d.jpg'),
+    ]);
+    const quadros = fs.readdirSync(pastaTemporaria)
+      .filter((arquivo) => arquivo.endsWith('.jpg'))
+      .sort()
+      .map((arquivo) => path.join(pastaTemporaria, arquivo));
+    if (!quadros.length) throw new Error('O vídeo não possui quadros que possam ser analisados.');
+    if (quadros.length > 1800) throw new Error('O vídeo é muito longo. Use um vídeo de até 15 minutos.');
+
+    importacaoVideo.etapa = 'ocr';
+    importacaoVideo.progresso = 8;
+    importacaoVideo.mensagem = `Preparando leitura de ${quadros.length} imagens…`;
+
+    const telefones = new Set(await executarOCRQuadros(pastaTemporaria));
+
+    const inserir = bancoContatos.prepare(`
+      INSERT OR IGNORE INTO contatos (telefone, origem, importado_em)
+      VALUES (?, ?, ?)
+    `);
+    const origem = path.basename(caminhoVideo);
+    const agora = new Date().toISOString();
+    let adicionados = 0;
+    for (const telefone of telefones) {
+      adicionados += Number(inserir.run(telefone, origem, agora).changes);
+    }
+
+    importacaoVideo = {
+      ativo: false,
+      etapa: 'concluido',
+      progresso: 100,
+      mensagem: `${telefones.size} número(s) do DDD 61 encontrado(s); ${adicionados} novo(s) salvo(s).`,
+      encontrados: telefones.size,
+      adicionados,
+      erro: null,
+    };
+    registrarLog(`Vídeo analisado: ${telefones.size} número(s) encontrados, ${adicionados} novo(s).`, 'sucesso');
+  } catch (erro) {
+    importacaoVideo = {
+      ativo: false,
+      etapa: 'erro',
+      progresso: 0,
+      mensagem: `Erro ao analisar vídeo: ${erro.message}`,
+      encontrados: 0,
+      adicionados: 0,
+      erro: erro.message,
+    };
+    registrarLog(importacaoVideo.mensagem, 'erro');
+  } finally {
+    fs.rmSync(pastaTemporaria, { recursive: true, force: true });
+    pastasTemporarias.delete(pastaTemporaria);
+  }
+}
 
 const PRIMEIROS_NOMES = [
   'Ana','Maria','Juliana','Fernanda','Patricia','Camila','Amanda','Bruna',
@@ -146,6 +395,15 @@ function registrarResultado(dados, statusCadastro, erro) {
   });
 }
 
+function escaparHtml(valor) {
+  return String(valor)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function gerarRelatorioHTML() {
   const total = resultados.length;
   const sucessos = resultados.filter((r) => r.status === 'sucesso').length;
@@ -156,8 +414,8 @@ function gerarRelatorioHTML() {
   const linhasHTML = resultados.map((r, i) => {
     const classe = r.status === 'sucesso' ? 'sucesso' : r.status === 'erro' ? 'erro' : 'aviso';
     const label = r.status === 'sucesso' ? 'Sucesso' : r.status === 'erro' ? 'Erro' : 'Sem Resposta';
-    const erroCol = r.erro ? `<td>${r.erro}</td>` : '<td>-</td>';
-    return `<tr class="${classe}"><td>${i + 1}</td><td>${r.nome}</td><td>${r.telefone}</td><td>${label}</td>${erroCol}<td>${r.horario}</td></tr>`;
+    const erroCol = r.erro ? `<td>${escaparHtml(r.erro)}</td>` : '<td>-</td>';
+    return `<tr class="${classe}"><td>${i + 1}</td><td>${escaparHtml(r.nome)}</td><td>${escaparHtml(r.telefone)}</td><td>${label}</td>${erroCol}<td>${escaparHtml(r.horario)}</td></tr>`;
   }).join('\n');
 
   const html = `<!DOCTYPE html>
@@ -483,8 +741,10 @@ async function executarSequenciaLista(cooldown, opcoes) {
       registrarLog(`Iniciando cadastro ${i + 1} de ${total}: ${dados.nome}.`);
 
       inicioCiclo = Date.now();
+      let cadastroEnviado = false;
       try {
         await preencherEEnviar(dados);
+        cadastroEnviado = true;
         const resultado = await aguardarRespostaSucesso();
 
         if (resultado.sucesso) {
@@ -502,6 +762,7 @@ async function executarSequenciaLista(cooldown, opcoes) {
       temposCiclo.push(Date.now() - inicioCiclo);
 
       fila.shift();
+      if (cadastroEnviado) marcarContatoUsado(dados.telefone);
       if (arquivoOriginal) {
         const destino = path.join(path.dirname(arquivoOriginal), `${path.basename(arquivoOriginal, '.txt')}-restantes.txt`);
         fs.writeFileSync(destino, fila.map((item) => `${item.nome} | ${item.telefone}`).join('\r\n'), 'utf8');
@@ -572,6 +833,8 @@ const servidor = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/estilo.css') return servirArquivo(res, 'estilo.css', 'text/css; charset=utf-8');
     if (req.method === 'GET' && req.url === '/app.js') return servirArquivo(res, 'app.js', 'application/javascript; charset=utf-8');
     if (req.method === 'GET' && req.url === '/api/status') return responderJson(res, 200, status);
+    if (req.method === 'GET' && req.url === '/api/contatos-salvos') return responderJson(res, 200, listarContatosSalvos());
+    if (req.method === 'GET' && req.url === '/api/importacao-video/status') return responderJson(res, 200, importacaoVideo);
     if (req.method === 'GET' && req.url === '/api/relatorio') {
       if (!relatorioHtml) return responderJson(res, 404, { erro: 'Nenhum relatório disponível.' });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -591,6 +854,14 @@ const servidor = http.createServer(async (req, res) => {
       if (req.url === '/api/carregar-texto') {
         carregarTexto(corpo.texto, corpo.apenasNumeros);
         return responderJson(res, 200, status);
+      }
+
+      if (req.url === '/api/importacao-video') {
+        if (importacaoVideo.ativo) throw new Error('Já existe um vídeo sendo analisado.');
+        processarVideoContatos(corpo.caminho).catch((erro) => {
+          importacaoVideo = { ativo: false, etapa: 'erro', progresso: 0, mensagem: erro.message, encontrados: 0, adicionados: 0, erro: erro.message };
+        });
+        return responderJson(res, 202, importacaoVideo);
       }
 
       if (req.url === '/api/preparar') {
@@ -629,15 +900,16 @@ const servidor = http.createServer(async (req, res) => {
   }
 });
 
-function iniciarServidor() {
+function iniciarServidor(pastaDados) {
   return new Promise((resolve) => {
-    servidor.listen(PORTA, () => {
+    inicializarBancoContatos(pastaDados);
+    servidor.listen(PORTA, '127.0.0.1', () => {
       console.log(`Painel aberto em http://localhost:${PORTA}`);
       resolve();
     });
   });
 }
 
-if (require.main === module) iniciarServidor();
+if (require.main === module) iniciarServidor(process.env.PAINEL_DADOS_DIR);
 
 module.exports = { iniciarServidor, PORTA };

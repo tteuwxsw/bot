@@ -16,6 +16,26 @@ const apenasNumerosCheck = document.querySelector('#apenas-numeros');
 const ordenarBtn = document.querySelector('#ordenar-contatos');
 const carregarContatosBtn = document.querySelector('#carregar-contatos');
 const arquivoContatosStatus = document.querySelector('#arquivo-contatos-status');
+const importarVideoBtn = document.querySelector('#importar-video');
+const modalVideo = document.querySelector('#modal-video');
+const selecionarVideoBtn = document.querySelector('#selecionar-video');
+const analisarVideoBtn = document.querySelector('#analisar-video');
+const modalVideoFechar = document.querySelector('#modal-video-fechar');
+const videoSelecionadoEl = document.querySelector('#video-selecionado');
+const videoProgresso = document.querySelector('#video-progresso');
+const videoEtapa = document.querySelector('#video-etapa');
+const videoPorcentagem = document.querySelector('#video-porcentagem');
+const videoProgressoFill = document.querySelector('#video-progresso-fill');
+const videoStatus = document.querySelector('#video-status');
+const abrirContatosSalvosBtn = document.querySelector('#abrir-contatos-salvos');
+const modalContatosSalvos = document.querySelector('#modal-contatos-salvos');
+const modalContatosSalvosCancelar = document.querySelector('#modal-contatos-salvos-cancelar');
+const usarContatosSalvosBtn = document.querySelector('#usar-contatos-salvos');
+const quantidadeContatosSalvos = document.querySelector('#quantidade-contatos-salvos');
+const listaContatosSalvos = document.querySelector('#lista-contatos-salvos');
+const totalContatosDisponiveis = document.querySelector('#total-contatos-disponiveis');
+const totalContatosUsados = document.querySelector('#total-contatos-usados');
+const contatosSalvosStatus = document.querySelector('#contatos-salvos-status');
 
 const ocultarChrome = document.querySelector('#ocultar-chrome');
 
@@ -29,6 +49,161 @@ const printsPorPastaInput = document.querySelector('#prints-por-pasta');
 const resumoOrganizarPrints = document.querySelector('#resumo-organizar-prints');
 
 let pastaPrintsLista = null;
+let videoSelecionado = null;
+let contatosSalvosDisponiveis = [];
+let monitorVideo = null;
+
+async function requisitarJson(url, opcoes = {}) {
+  const resposta = await fetch(url, opcoes);
+  const dados = await resposta.json();
+  if (!resposta.ok) throw new Error(dados.erro || dados.mensagem || 'Não foi possível concluir a operação.');
+  return dados;
+}
+
+function exibirStatusVideo(dados) {
+  const progresso = Math.max(0, Math.min(100, Number(dados.progresso) || 0));
+  videoProgresso.style.display = dados.ativo || dados.etapa ? 'block' : 'none';
+  videoEtapa.textContent = dados.etapa === 'quadros' ? 'Extraindo imagens' : dados.etapa === 'ocr' ? 'Lendo números' : dados.etapa === 'concluido' ? 'Concluído' : dados.etapa === 'erro' ? 'Erro' : 'Preparando';
+  videoPorcentagem.textContent = `${progresso}%`;
+  videoProgressoFill.style.width = `${progresso}%`;
+  videoStatus.textContent = dados.mensagem || '';
+  videoStatus.className = `video-status${dados.erro ? ' erro' : dados.etapa === 'concluido' ? ' sucesso' : ''}`;
+  analisarVideoBtn.disabled = Boolean(dados.ativo) || !videoSelecionado;
+  selecionarVideoBtn.disabled = Boolean(dados.ativo);
+}
+
+async function atualizarStatusVideo() {
+  try {
+    const dados = await requisitarJson('/api/importacao-video/status');
+    exibirStatusVideo(dados);
+    if (!dados.ativo && monitorVideo) {
+      clearInterval(monitorVideo);
+      monitorVideo = null;
+    }
+  } catch (erro) {
+    videoStatus.textContent = erro.message;
+    videoStatus.className = 'video-status erro';
+  }
+}
+
+function iniciarMonitorVideo() {
+  if (monitorVideo) clearInterval(monitorVideo);
+  atualizarStatusVideo();
+  monitorVideo = setInterval(atualizarStatusVideo, 1000);
+}
+
+importarVideoBtn.addEventListener('click', async () => {
+  modalVideo.style.display = 'flex';
+  await atualizarStatusVideo();
+});
+
+selecionarVideoBtn.addEventListener('click', async () => {
+  if (!window.painelLocal || !window.painelLocal.selecionarVideoContatos) return;
+  const video = await window.painelLocal.selecionarVideoContatos();
+  if (!video) return;
+  videoSelecionado = video;
+  videoSelecionadoEl.textContent = video.nome;
+  videoSelecionadoEl.classList.remove('sem-pasta');
+  videoStatus.textContent = 'Vídeo pronto para análise.';
+  videoStatus.className = 'video-status';
+  analisarVideoBtn.disabled = false;
+});
+
+analisarVideoBtn.addEventListener('click', async () => {
+  if (!videoSelecionado) return;
+  try {
+    const dados = await requisitarJson('/api/importacao-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ caminho: videoSelecionado.caminho }),
+    });
+    exibirStatusVideo(dados);
+    iniciarMonitorVideo();
+  } catch (erro) {
+    videoStatus.textContent = erro.message;
+    videoStatus.className = 'video-status erro';
+  }
+});
+
+modalVideoFechar.addEventListener('click', () => {
+  modalVideo.style.display = 'none';
+});
+
+modalVideo.addEventListener('click', (evento) => {
+  if (evento.target === modalVideo) modalVideo.style.display = 'none';
+});
+
+function atualizarSelecaoContatosSalvos() {
+  const quantidade = parseInt(quantidadeContatosSalvos.value, 10) || 0;
+  listaContatosSalvos.querySelectorAll('.contato-salvo-linha').forEach((linha, indice) => {
+    linha.classList.toggle('selecionado', indice < quantidade);
+  });
+}
+
+async function carregarContatosSalvos() {
+  contatosSalvosStatus.textContent = 'Carregando contatos…';
+  contatosSalvosStatus.className = 'arquivo-contatos-status';
+  usarContatosSalvosBtn.disabled = true;
+  try {
+    const dados = await requisitarJson('/api/contatos-salvos');
+    contatosSalvosDisponiveis = dados.disponiveis || [];
+    totalContatosDisponiveis.textContent = dados.totalDisponiveis ?? contatosSalvosDisponiveis.length;
+    totalContatosUsados.textContent = dados.usados || 0;
+    const limite = Math.min(500, contatosSalvosDisponiveis.length);
+    quantidadeContatosSalvos.max = Math.max(1, limite);
+    quantidadeContatosSalvos.value = Math.min(Math.max(1, getMaxContatos()), Math.max(1, limite));
+    listaContatosSalvos.innerHTML = '';
+    contatosSalvosDisponiveis.forEach((contato, indice) => {
+      const linha = document.createElement('div');
+      linha.className = 'contato-salvo-linha';
+      const numero = document.createElement('span');
+      const telefone = document.createElement('code');
+      numero.textContent = `${indice + 1}.`;
+      telefone.textContent = contato.formatado;
+      linha.append(numero, telefone);
+      listaContatosSalvos.appendChild(linha);
+    });
+    contatosSalvosStatus.textContent = contatosSalvosDisponiveis.length ? '' : 'Não há contatos disponíveis. Importe um vídeo primeiro.';
+    usarContatosSalvosBtn.disabled = contatosSalvosDisponiveis.length === 0;
+    atualizarSelecaoContatosSalvos();
+  } catch (erro) {
+    contatosSalvosStatus.textContent = erro.message;
+    contatosSalvosStatus.className = 'arquivo-contatos-status erro';
+  }
+}
+
+abrirContatosSalvosBtn.addEventListener('click', async () => {
+  modalContatosSalvos.style.display = 'flex';
+  await carregarContatosSalvos();
+});
+
+quantidadeContatosSalvos.addEventListener('input', atualizarSelecaoContatosSalvos);
+
+modalContatosSalvosCancelar.addEventListener('click', () => {
+  modalContatosSalvos.style.display = 'none';
+});
+
+modalContatosSalvos.addEventListener('click', (evento) => {
+  if (evento.target === modalContatosSalvos) modalContatosSalvos.style.display = 'none';
+});
+
+usarContatosSalvosBtn.addEventListener('click', () => {
+  const quantidade = parseInt(quantidadeContatosSalvos.value, 10);
+  const limite = Math.min(500, contatosSalvosDisponiveis.length);
+  if (!Number.isInteger(quantidade) || quantidade < 1 || quantidade > limite) {
+    contatosSalvosStatus.textContent = `Informe uma quantidade entre 1 e ${limite}.`;
+    contatosSalvosStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  const telefones = contatosSalvosDisponiveis.slice(0, quantidade).map((contato) => contato.formatado);
+  apenasNumerosCheck.checked = true;
+  quantidadeListaInput.value = quantidade;
+  atualizarPlaceholder();
+  gerarCampos(quantidade, telefones);
+  arquivoContatosStatus.textContent = `${quantidade} contato(s) salvo(s) carregado(s). Eles serão retirados dos disponíveis conforme forem usados.`;
+  arquivoContatosStatus.className = 'arquivo-contatos-status sucesso';
+  modalContatosSalvos.style.display = 'none';
+});
 
 ocultarChrome.addEventListener('change', async () => {
   await chamar('/api/toggle-chrome', { ocultar: ocultarChrome.checked });
@@ -289,9 +464,25 @@ function mostrarStatus(status) {
 
   const logs = status.logs || [];
   contadorLog.textContent = `${logs.length} evento${logs.length === 1 ? '' : 's'}`;
-  logsEl.innerHTML = logs.length
-    ? logs.map((log) => `<div class="log ${log.tipo}"><time>${log.horario}</time><span>${log.mensagem}</span></div>`).join('')
-    : '<p class="log-vazio">Aguardando atividade…</p>';
+  logsEl.innerHTML = '';
+  if (logs.length) {
+    logs.forEach((log) => {
+      const linha = document.createElement('div');
+      const horario = document.createElement('time');
+      const mensagem = document.createElement('span');
+      const tipo = ['sucesso', 'erro', 'aviso'].includes(log.tipo) ? log.tipo : 'info';
+      linha.className = `log ${tipo}`;
+      horario.textContent = log.horario;
+      mensagem.textContent = log.mensagem;
+      linha.append(horario, mensagem);
+      logsEl.appendChild(linha);
+    });
+  } else {
+    const vazio = document.createElement('p');
+    vazio.className = 'log-vazio';
+    vazio.textContent = 'Aguardando atividade…';
+    logsEl.appendChild(vazio);
+  }
   logsEl.scrollTop = logsEl.scrollHeight;
 
   if (status.relatorio) baixarRelatorioBtn.style.display = 'block';
