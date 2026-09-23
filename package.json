@@ -1,7 +1,7 @@
 {
   "name": "preenchedor-amigos-do-fred",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Painel local para preparar um cadastro para revisão.",
   "main": "electron-main.js",
   "engines": {
@@ -53,6 +53,7 @@
     },
     "nsis": {
       "oneClick": false,
+      "include": "installer.nsh",
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,

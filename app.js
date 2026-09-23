@@ -36,6 +36,22 @@ const listaContatosSalvos = document.querySelector('#lista-contatos-salvos');
 const totalContatosDisponiveis = document.querySelector('#total-contatos-disponiveis');
 const totalContatosUsados = document.querySelector('#total-contatos-usados');
 const contatosSalvosStatus = document.querySelector('#contatos-salvos-status');
+const abrirAgendamentoBtn = document.querySelector('#abrir-agendamento');
+const modalAgendamento = document.querySelector('#modal-agendamento');
+const agendamentoAtivo = document.querySelector('#agendamento-ativo');
+const agendamentoHorario = document.querySelector('#agendamento-horario');
+const agendamentoQuantidade = document.querySelector('#agendamento-quantidade');
+const agendamentoCooldown = document.querySelector('#agendamento-cooldown');
+const agendamentoErros = document.querySelector('#agendamento-erros');
+const agendamentoOcultarChrome = document.querySelector('#agendamento-ocultar-chrome');
+const agendamentoWindows = document.querySelector('#agendamento-windows');
+const agendamentoWindowsStatus = document.querySelector('#agendamento-windows-status');
+const agendamentoDisponiveis = document.querySelector('#agendamento-disponiveis');
+const agendamentoProxima = document.querySelector('#agendamento-proxima');
+const agendamentoHistoricoLista = document.querySelector('#agendamento-historico-lista');
+const agendamentoStatus = document.querySelector('#agendamento-status');
+const agendamentoCancelar = document.querySelector('#agendamento-cancelar');
+const agendamentoSalvar = document.querySelector('#agendamento-salvar');
 
 const ocultarChrome = document.querySelector('#ocultar-chrome');
 
@@ -52,6 +68,9 @@ let pastaPrintsLista = null;
 let videoSelecionado = null;
 let contatosSalvosDisponiveis = [];
 let monitorVideo = null;
+let agendamentoWindowsDisponivel = false;
+let agendamentoWindowsAtivoAnterior = false;
+let configuracaoAgendamentoCarregada = null;
 
 async function requisitarJson(url, opcoes = {}) {
   const resposta = await fetch(url, opcoes);
@@ -203,6 +222,174 @@ usarContatosSalvosBtn.addEventListener('click', () => {
   arquivoContatosStatus.textContent = `${quantidade} contato(s) salvo(s) carregado(s). Eles serão retirados dos disponíveis conforme forem usados.`;
   arquivoContatosStatus.className = 'arquivo-contatos-status sucesso';
   modalContatosSalvos.style.display = 'none';
+});
+
+function atualizarCamposAgendamento() {
+  const ativo = agendamentoAtivo.checked;
+  [agendamentoHorario, agendamentoQuantidade, agendamentoCooldown, agendamentoErros, agendamentoOcultarChrome].forEach((campo) => {
+    campo.disabled = !ativo;
+  });
+  agendamentoWindows.disabled = !ativo || !agendamentoWindowsDisponivel;
+  if (!ativo) agendamentoWindows.checked = false;
+}
+
+function nomeStatusAgendamento(status) {
+  const nomes = {
+    concluido: 'Concluído',
+    parcial: 'Parcial',
+    erro: 'Erro',
+    ignorado: 'Ignorado',
+    sem_contatos: 'Sem contatos',
+    interrompido: 'Interrompido',
+    executando: 'Executando',
+    preparando: 'Preparando',
+  };
+  return nomes[status] || status;
+}
+
+function renderizarHistoricoAgendamento(historico) {
+  agendamentoHistoricoLista.innerHTML = '';
+  if (!historico.length) {
+    const vazio = document.createElement('p');
+    vazio.className = 'ajuda';
+    vazio.textContent = 'Nenhuma execução registrada.';
+    agendamentoHistoricoLista.appendChild(vazio);
+    return;
+  }
+  historico.forEach((execucao) => {
+    const item = document.createElement('div');
+    const data = document.createElement('time');
+    const resumo = document.createElement('span');
+    const situacao = document.createElement('strong');
+    item.className = `agendamento-historico-item ${execucao.status === 'concluido' ? 'sucesso' : ['erro', 'interrompido'].includes(execucao.status) ? 'erro' : ''}`;
+    data.textContent = new Date(`${execucao.data}T12:00:00`).toLocaleDateString('pt-BR');
+    resumo.textContent = `${execucao.sucessos}/${execucao.processados} sucesso(s) · ${execucao.origem}`;
+    situacao.textContent = nomeStatusAgendamento(execucao.status);
+    item.title = execucao.mensagem || '';
+    item.append(data, resumo, situacao);
+    agendamentoHistoricoLista.appendChild(item);
+  });
+}
+
+function preencherResumoAgendamento(dados) {
+  const config = dados.configuracao;
+  agendamentoAtivo.checked = config.ativo;
+  agendamentoHorario.value = config.horario;
+  agendamentoQuantidade.value = config.quantidade;
+  agendamentoCooldown.value = config.cooldown;
+  agendamentoErros.value = config.limiteErros;
+  agendamentoOcultarChrome.checked = config.ocultarChrome;
+  agendamentoDisponiveis.textContent = dados.disponiveis;
+  agendamentoProxima.textContent = dados.proximaExecucao
+    ? new Date(dados.proximaExecucao).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+    : 'Desativado';
+  renderizarHistoricoAgendamento(dados.historico || []);
+}
+
+async function carregarAgendamento() {
+  agendamentoStatus.textContent = 'Carregando configuração…';
+  agendamentoStatus.className = 'arquivo-contatos-status';
+  try {
+    const [dados, tarefaWindows] = await Promise.all([
+      requisitarJson('/api/agendamento'),
+      window.painelLocal && window.painelLocal.statusAgendamentoWindows
+        ? window.painelLocal.statusAgendamentoWindows()
+        : Promise.resolve({ disponivel: false, ativo: false }),
+    ]);
+    preencherResumoAgendamento(dados);
+    configuracaoAgendamentoCarregada = { ...dados.configuracao };
+    agendamentoWindowsDisponivel = Boolean(tarefaWindows.disponivel);
+    agendamentoWindowsAtivoAnterior = agendamentoWindowsDisponivel
+      ? Boolean(tarefaWindows.ativo)
+      : Boolean(dados.configuracao.windowsAtivo);
+    agendamentoWindows.checked = dados.configuracao.ativo && agendamentoWindowsAtivoAnterior;
+    agendamentoWindowsStatus.textContent = agendamentoWindowsDisponivel
+      ? tarefaWindows.ativo ? 'Tarefa diária encontrada no Windows.' : 'Nenhuma tarefa diária ativa no Windows.'
+      : 'Instale o aplicativo para habilitar o Agendador do Windows.';
+    atualizarCamposAgendamento();
+    agendamentoStatus.textContent = '';
+  } catch (erro) {
+    agendamentoStatus.textContent = erro.message;
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+  }
+}
+
+abrirAgendamentoBtn.addEventListener('click', async () => {
+  modalAgendamento.style.display = 'flex';
+  await carregarAgendamento();
+});
+
+agendamentoAtivo.addEventListener('change', atualizarCamposAgendamento);
+
+agendamentoCancelar.addEventListener('click', () => {
+  modalAgendamento.style.display = 'none';
+});
+
+modalAgendamento.addEventListener('click', (evento) => {
+  if (evento.target === modalAgendamento) modalAgendamento.style.display = 'none';
+});
+
+agendamentoSalvar.addEventListener('click', async () => {
+  const configuracao = {
+    ativo: agendamentoAtivo.checked,
+    windowsAtivo: agendamentoAtivo.checked && agendamentoWindows.checked,
+    horario: agendamentoHorario.value,
+    quantidade: parseInt(agendamentoQuantidade.value, 10),
+    cooldown: parseInt(agendamentoCooldown.value, 10),
+    ocultarChrome: agendamentoOcultarChrome.checked,
+    limiteErros: parseInt(agendamentoErros.value, 10),
+  };
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(configuracao.horario)
+      || !Number.isInteger(configuracao.quantidade) || configuracao.quantidade < 1 || configuracao.quantidade > 500
+      || !Number.isInteger(configuracao.cooldown) || configuracao.cooldown < 5 || configuracao.cooldown > 300
+      || !Number.isInteger(configuracao.limiteErros) || configuracao.limiteErros < 1 || configuracao.limiteErros > 10) {
+    agendamentoStatus.textContent = 'Revise o horário e os limites informados.';
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+
+  agendamentoSalvar.disabled = true;
+  agendamentoStatus.textContent = 'Salvando agendamento…';
+  agendamentoStatus.className = 'arquivo-contatos-status';
+  let tarefaWindowsAlterada = false;
+  try {
+    if (agendamentoWindowsDisponivel && window.painelLocal.configurarAgendamentoWindows) {
+      const resultadoWindows = await window.painelLocal.configurarAgendamentoWindows({
+        ativo: configuracao.windowsAtivo,
+        horario: configuracao.horario,
+      });
+      if (!resultadoWindows.ok) throw new Error(resultadoWindows.erro || 'Não foi possível configurar o Agendador do Windows.');
+      tarefaWindowsAlterada = true;
+    } else if (configuracao.windowsAtivo) {
+      throw new Error('O Agendador do Windows não está disponível nesta instalação.');
+    }
+    const dados = await requisitarJson('/api/agendamento', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(configuracao),
+    });
+    preencherResumoAgendamento(dados);
+    configuracaoAgendamentoCarregada = { ...dados.configuracao };
+    agendamentoWindowsAtivoAnterior = configuracao.windowsAtivo;
+    agendamentoStatus.textContent = configuracao.ativo ? 'Agendamento salvo com sucesso.' : 'Agendamento desativado.';
+    agendamentoStatus.className = 'arquivo-contatos-status sucesso';
+    agendamentoWindowsStatus.textContent = configuracao.windowsAtivo
+      ? 'Tarefa diária ativa no Windows.'
+      : 'Agendamento do Windows desativado.';
+  } catch (erro) {
+    let mensagem = erro.message;
+    if (tarefaWindowsAlterada && configuracaoAgendamentoCarregada && window.painelLocal.configurarAgendamentoWindows) {
+      const rollback = await window.painelLocal.configurarAgendamentoWindows({
+        ativo: agendamentoWindowsAtivoAnterior,
+        horario: configuracaoAgendamentoCarregada.horario,
+      });
+      if (!rollback.ok) mensagem += ' Também não foi possível restaurar a tarefa anterior do Windows.';
+    }
+    agendamentoStatus.textContent = mensagem;
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+  } finally {
+    agendamentoSalvar.disabled = false;
+  }
 });
 
 ocultarChrome.addEventListener('change', async () => {

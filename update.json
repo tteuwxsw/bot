@@ -1,6 +1,6 @@
 {
-  "versao": "1.0.9",
-  "url": "https://github.com/tteuwxsw/bot/releases/download/v1.0.9/Painel.de.Preenchimento.Setup.1.0.9.exe",
+  "versao": "1.0.10",
+  "url": "https://github.com/tteuwxsw/bot/releases/download/v1.0.10/Painel.de.Preenchimento.Setup.1.0.10.exe",
   "data": "2026-09-22",
-  "mudancas": "Importação de contatos DDD 61 por vídeo MP4 com banco de contatos disponíveis e usados"
+  "mudancas": "Agendamento diário pelo aplicativo ou Agendador do Windows com limite, histórico e proteção contra duplicidade"
 }

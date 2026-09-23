@@ -26,6 +26,7 @@
           <button id="stop" class="secundario" type="button">■ Stop</button>
         </div>
         <button id="importar-video" class="importar-video-botao" type="button">Importar contatos de vídeo</button>
+        <button id="abrir-agendamento" class="agendamento-botao" type="button">Agendamento diário</button>
         <div class="modal-checkbox ocultar-principal">
           <input id="ocultar-chrome" type="checkbox">
           <label for="ocultar-chrome">Ocultar janela do Chrome</label>
@@ -123,6 +124,55 @@
         <div class="modal-acoes">
           <button id="modal-contatos-salvos-cancelar" class="secundario" type="button">Voltar</button>
           <button id="usar-contatos-salvos" class="primario" type="button" disabled>Carregar contatos</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modal-agendamento" class="modal-overlay" style="display:none">
+      <div class="modal modal-agendamento">
+        <h2>Agendamento diário</h2>
+        <p class="modal-descricao">Executa um lote usando somente contatos salvos que ainda não foram utilizados.</p>
+        <div class="agendamento-resumo">
+          <div><span>Contatos disponíveis</span><strong id="agendamento-disponiveis">0</strong></div>
+          <div><span>Próxima execução</span><strong id="agendamento-proxima">Desativado</strong></div>
+        </div>
+        <div class="modal-campos agendamento-campos">
+          <div class="modal-checkbox agendamento-ativar">
+            <input id="agendamento-ativo" type="checkbox">
+            <label for="agendamento-ativo">Ativar agendamento diário</label>
+          </div>
+          <div class="agendamento-grade">
+            <label class="modal-label" for="agendamento-horario">Horário</label>
+            <input id="agendamento-horario" type="time" value="09:00" class="modal-input">
+            <label class="modal-label" for="agendamento-quantidade">Cadastros por dia</label>
+            <input id="agendamento-quantidade" type="number" min="1" max="500" value="40" class="modal-input">
+            <label class="modal-label" for="agendamento-cooldown">Cooldown (segundos)</label>
+            <input id="agendamento-cooldown" type="number" min="5" max="300" value="20" class="modal-input">
+            <label class="modal-label" for="agendamento-erros">Parar após erros seguidos</label>
+            <input id="agendamento-erros" type="number" min="1" max="10" value="3" class="modal-input">
+          </div>
+          <div class="modal-checkbox">
+            <input id="agendamento-ocultar-chrome" type="checkbox" checked>
+            <label for="agendamento-ocultar-chrome">Ocultar Chrome durante o lote</label>
+          </div>
+          <div class="agendamento-modo">
+            <div><strong>Com o aplicativo aberto</strong><span>O próprio bot inicia o lote no horário configurado.</span></div>
+          </div>
+          <div class="modal-checkbox">
+            <input id="agendamento-windows" type="checkbox">
+            <label for="agendamento-windows">Abrir pelo Agendador do Windows quando o bot estiver fechado</label>
+          </div>
+          <span id="agendamento-windows-status" class="ajuda"></span>
+          <p class="agendamento-aviso">Se o computador estiver desligado ou suspenso no horário, a execução daquele dia será ignorada.</p>
+          <section class="agendamento-historico">
+            <h3>Últimas execuções</h3>
+            <div id="agendamento-historico-lista" class="agendamento-historico-lista"><p class="ajuda">Nenhuma execução registrada.</p></div>
+          </section>
+          <span id="agendamento-status" class="arquivo-contatos-status"></span>
+        </div>
+        <div class="modal-acoes">
+          <button id="agendamento-cancelar" class="secundario" type="button">Cancelar</button>
+          <button id="agendamento-salvar" class="primario" type="button">Salvar agendamento</button>
         </div>
       </div>
     </div>

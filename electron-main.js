@@ -3,9 +3,108 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
-const { iniciarServidor, PORTA } = require('./servidor');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+const { iniciarServidor, iniciarMonitorAgendamento, PORTA } = require('./servidor');
 
+const execFileAsync = promisify(execFile);
+const NOME_TAREFA_AGENDADA = 'Painel de Preenchimento - Cadastro diario';
 let janela;
+
+function temArgumentoAgendamento(argumentos = process.argv) {
+  return argumentos.includes('--executar-agendamento');
+}
+
+function solicitarExecucaoAgendada() {
+  return new Promise((resolve) => {
+    const requisicao = http.request({
+      hostname: '127.0.0.1',
+      port: PORTA,
+      path: '/api/agendamento/executar',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, (res) => {
+      res.resume();
+      res.on('end', resolve);
+    });
+    requisicao.on('error', resolve);
+    requisicao.end(JSON.stringify({ origem: 'windows' }));
+  });
+}
+
+function escaparPowerShell(valor) {
+  return String(valor).replace(/'/g, "''");
+}
+
+async function configurarAgendamentoWindows({ ativo, horario }) {
+  if (!app.isPackaged) return { ok: false, erro: 'O Agendador do Windows só pode ser configurado no aplicativo instalado.' };
+  if (ativo && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(horario || ''))) {
+    return { ok: false, erro: 'Horário inválido para o Agendador do Windows.' };
+  }
+
+  const nome = escaparPowerShell(NOME_TAREFA_AGENDADA);
+  const executavel = escaparPowerShell(process.execPath);
+  const script = ativo
+    ? `$action = New-ScheduledTaskAction -Execute '${executavel}' -Argument '--executar-agendamento'; `
+      + `$trigger = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact('${horario}', 'HH:mm', $null)); `
+      + '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable:$false -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries; '
+      + '$principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited; '
+      + `Register-ScheduledTask -TaskName '${nome}' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description 'Executa o lote diário do Painel de Preenchimento.' -Force | Out-Null;`
+    : `Unregister-ScheduledTask -TaskName '${nome}' -Confirm:$false -ErrorAction SilentlyContinue;`;
+
+  try {
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+    return { ok: true, ativo: Boolean(ativo) };
+  } catch (erro) {
+    return { ok: false, erro: erro.stderr || erro.message };
+  }
+}
+
+async function consultarAgendamentoWindows() {
+  if (!app.isPackaged) return { disponivel: false, ativo: false };
+  const nome = escaparPowerShell(NOME_TAREFA_AGENDADA);
+  const script = `$task = Get-ScheduledTask -TaskName '${nome}' -ErrorAction SilentlyContinue; `
+    + "if ($task) { $trigger = $task.Triggers | Select-Object -First 1; $action = $task.Actions | Select-Object -First 1; "
+    + "[pscustomobject]@{ ativo = ($task.State -ne 'Disabled'); executavel = $action.Execute; argumentos = $action.Arguments; horario = ([datetime]$trigger.StartBoundary).ToString('HH:mm') } | ConvertTo-Json -Compress "
+    + '} else { [pscustomobject]@{ ativo = $false; executavel = $null; argumentos = $null; horario = $null } | ConvertTo-Json -Compress }';
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+    return { disponivel: true, ...JSON.parse(stdout.trim()) };
+  } catch {
+    return { disponivel: true, ativo: false };
+  }
+}
+
+function obterAgendamentoLocal() {
+  return new Promise((resolve, reject) => {
+    http.get(`http://127.0.0.1:${PORTA}/api/agendamento`, (res) => {
+      let dados = '';
+      res.on('data', (parte) => { dados += parte; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(dados)); } catch (erro) { reject(erro); }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function reconciliarAgendamentoWindows() {
+  if (!app.isPackaged) return;
+  try {
+    const [resumo, tarefa] = await Promise.all([obterAgendamentoLocal(), consultarAgendamentoWindows()]);
+    const config = resumo.configuracao;
+    const deveEstarAtivo = Boolean(config.ativo && config.windowsAtivo);
+    const tarefaCorreta = tarefa.ativo
+      && path.normalize(tarefa.executavel || '') === path.normalize(process.execPath)
+      && String(tarefa.argumentos || '').trim() === '--executar-agendamento'
+      && tarefa.horario === config.horario;
+    if ((deveEstarAtivo && !tarefaCorreta) || (!deveEstarAtivo && tarefa.ativo)) {
+      await configurarAgendamentoWindows({ ativo: deveEstarAtivo, horario: config.horario });
+    }
+  } catch {}
+}
 
 function versaoMaisNova(disponivel, atual) {
   const partesDisponivel = disponivel.split('.').map(Number);
@@ -46,7 +145,16 @@ function verificarAtualizacao() {
 }
 
 async function criarJanela() {
-  await iniciarServidor(process.env.PAINEL_DADOS_DIR || app.getPath('userData'));
+  const inicioPeloAgendamento = temArgumentoAgendamento();
+  await iniciarServidor(process.env.PAINEL_DADOS_DIR || app.getPath('userData'), {
+    adiarMonitorAgendamento: inicioPeloAgendamento,
+  });
+  await reconciliarAgendamentoWindows();
+
+  if (inicioPeloAgendamento) {
+    await solicitarExecucaoAgendada();
+    iniciarMonitorAgendamento({ verificarAgora: false, ignorarMinutoAtual: true });
+  }
 
   janela = new BrowserWindow({
     width: 1060,
@@ -82,7 +190,19 @@ async function criarJanela() {
   }
 }
 
-app.whenReady().then(criarJanela);
+const possuiTrava = process.env.PAINEL_IGNORAR_TRAVA_INSTANCIA === '1' || app.requestSingleInstanceLock();
+if (!possuiTrava) {
+  app.quit();
+} else {
+  app.on('second-instance', (_evento, argumentos) => {
+    if (temArgumentoAgendamento(argumentos)) solicitarExecucaoAgendada();
+    if (janela) {
+      if (janela.isMinimized()) janela.restore();
+      janela.focus();
+    }
+  });
+  app.whenReady().then(criarJanela);
+}
 ipcMain.handle('selecionar-arquivo-txt', async () => {
   const resultado = await dialog.showOpenDialog({
     title: 'Selecione a lista de dados',
@@ -117,6 +237,8 @@ ipcMain.handle('selecionar-video-contatos', async () => {
     nome: path.basename(resultado.filePaths[0]),
   };
 });
+ipcMain.handle('configurar-agendamento-windows', (_evento, configuracao) => configurarAgendamentoWindows(configuracao));
+ipcMain.handle('status-agendamento-windows', () => consultarAgendamentoWindows());
 app.on('window-all-closed', () => app.quit());
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) criarJanela();

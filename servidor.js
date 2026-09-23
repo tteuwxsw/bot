@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
 
 const execFileAsync = promisify(execFile);
 
-const PORTA = 3030;
+const PORTA = parseInt(process.env.PAINEL_PORTA, 10) || 3030;
 const URL_CADASTRO = 'https://amigosdofred.com.br/cadastro';
 let sleepEntreCadastros = 20000;
 let relatorioHtml = null;
@@ -26,6 +26,7 @@ let resultados = [];
 let temposCiclo = [];
 let inicioCiclo = null;
 let ocultarChrome = false;
+let automacaoEmAndamento = false;
 let tirarPrint = false;
 let pastaPrints = null;
 let organizarPrints = false;
@@ -34,6 +35,9 @@ let printsSalvos = 0;
 let pastaSessaoPrints = null;
 let bancoContatos;
 let diretorioDados;
+let monitorAgendamento;
+let execucaoAgendadaEmAndamento = false;
+let minutoIgnoradoAgendamento = null;
 let importacaoVideo = {
   ativo: false,
   etapa: '',
@@ -64,7 +68,121 @@ function inicializarBancoContatos(diretorio) {
       importado_em TEXT NOT NULL,
       usado_em TEXT
     );
+    CREATE TABLE IF NOT EXISTS configuracao_agendamento (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      ativo INTEGER NOT NULL DEFAULT 0,
+      windows_ativo INTEGER NOT NULL DEFAULT 0,
+      horario TEXT NOT NULL DEFAULT '09:00',
+      quantidade INTEGER NOT NULL DEFAULT 40,
+      cooldown INTEGER NOT NULL DEFAULT 20,
+      ocultar_chrome INTEGER NOT NULL DEFAULT 1,
+      limite_erros INTEGER NOT NULL DEFAULT 3,
+      atualizado_em TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS execucoes_agendadas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      data_execucao TEXT NOT NULL UNIQUE,
+      origem TEXT NOT NULL,
+      iniciado_em TEXT NOT NULL,
+      finalizado_em TEXT,
+      status TEXT NOT NULL,
+      planejados INTEGER NOT NULL,
+      processados INTEGER NOT NULL DEFAULT 0,
+      sucessos INTEGER NOT NULL DEFAULT 0,
+      mensagem TEXT
+    );
+    INSERT OR IGNORE INTO configuracao_agendamento (
+      id, ativo, windows_ativo, horario, quantidade, cooldown, ocultar_chrome, limite_erros, atualizado_em
+    ) VALUES (1, 0, 0, '09:00', 40, 20, 1, 3, datetime('now'));
+    UPDATE execucoes_agendadas
+    SET status = 'interrompido', finalizado_em = datetime('now'),
+        mensagem = 'O aplicativo foi fechado antes da conclusão.'
+    WHERE status IN ('preparando', 'executando');
   `);
+}
+
+function dataLocal(data = new Date()) {
+  const pad = (valor) => String(valor).padStart(2, '0');
+  return `${data.getFullYear()}-${pad(data.getMonth() + 1)}-${pad(data.getDate())}`;
+}
+
+function obterConfiguracaoAgendamento() {
+  const config = bancoContatos.prepare('SELECT * FROM configuracao_agendamento WHERE id = 1').get();
+  return {
+    ativo: Boolean(config.ativo),
+    windowsAtivo: Boolean(config.windows_ativo),
+    horario: config.horario,
+    quantidade: config.quantidade,
+    cooldown: config.cooldown,
+    ocultarChrome: Boolean(config.ocultar_chrome),
+    limiteErros: config.limite_erros,
+  };
+}
+
+function validarConfiguracaoAgendamento(dados) {
+  const horario = String(dados.horario || '');
+  const quantidade = parseInt(dados.quantidade, 10);
+  const cooldown = parseInt(dados.cooldown, 10);
+  const limiteErros = parseInt(dados.limiteErros, 10);
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(horario)) throw new Error('Informe um horário válido.');
+  if (!Number.isInteger(quantidade) || quantidade < 1 || quantidade > 500) throw new Error('A quantidade diária deve ficar entre 1 e 500.');
+  if (!Number.isInteger(cooldown) || cooldown < 5 || cooldown > 300) throw new Error('O cooldown deve ficar entre 5 e 300 segundos.');
+  if (!Number.isInteger(limiteErros) || limiteErros < 1 || limiteErros > 10) throw new Error('O limite de erros deve ficar entre 1 e 10.');
+  return {
+    ativo: Boolean(dados.ativo),
+    windowsAtivo: Boolean(dados.windowsAtivo),
+    horario,
+    quantidade,
+    cooldown,
+    ocultarChrome: Boolean(dados.ocultarChrome),
+    limiteErros,
+  };
+}
+
+function salvarConfiguracaoAgendamento(dados) {
+  const config = validarConfiguracaoAgendamento(dados);
+  bancoContatos.prepare(`
+    UPDATE configuracao_agendamento
+    SET ativo = ?, windows_ativo = ?, horario = ?, quantidade = ?, cooldown = ?,
+        ocultar_chrome = ?, limite_erros = ?, atualizado_em = ?
+    WHERE id = 1
+  `).run(
+    Number(config.ativo), Number(config.windowsAtivo), config.horario, config.quantidade,
+    config.cooldown, Number(config.ocultarChrome), config.limiteErros, new Date().toISOString(),
+  );
+  return config;
+}
+
+function calcularProximaExecucao(config) {
+  if (!config.ativo) return null;
+  const agora = new Date();
+  const [hora, minuto] = config.horario.split(':').map(Number);
+  const proxima = new Date(agora);
+  proxima.setHours(hora, minuto, 0, 0);
+  const fimDoMinuto = new Date(proxima);
+  fimDoMinuto.setSeconds(59, 999);
+  const executouHoje = Boolean(bancoContatos.prepare('SELECT 1 FROM execucoes_agendadas WHERE data_execucao = ?').get(dataLocal(agora)));
+  if (fimDoMinuto < agora || executouHoje) proxima.setDate(proxima.getDate() + 1);
+  return proxima.toISOString();
+}
+
+function obterResumoAgendamento() {
+  const configuracao = obterConfiguracaoAgendamento();
+  const disponiveis = bancoContatos.prepare('SELECT COUNT(*) AS total FROM contatos WHERE usado_em IS NULL').get().total;
+  const historico = bancoContatos.prepare(`
+    SELECT data_execucao AS data, origem, iniciado_em AS iniciadoEm, finalizado_em AS finalizadoEm,
+           status, planejados, processados, sucessos, mensagem
+    FROM execucoes_agendadas
+    ORDER BY id DESC
+    LIMIT 10
+  `).all();
+  return {
+    configuracao,
+    proximaExecucao: calcularProximaExecucao(configuracao),
+    disponiveis,
+    emExecucao: execucaoAgendadaEmAndamento,
+    historico,
+  };
 }
 
 function normalizarTelefone61(valor) {
@@ -471,6 +589,7 @@ function gerarRelatorioHTML() {
 }
 
 function carregarDados(caminho) {
+  if (automacaoEmAndamento) throw new Error('Não é possível substituir a lista durante uma automação.');
   resultados = [];
   registrarLog('Lendo a lista de dados selecionada.');
   if (path.extname(caminho).toLowerCase() !== '.txt') throw new Error('Selecione um arquivo .txt.');
@@ -501,6 +620,7 @@ function formatarTelefone(telefone) {
 }
 
 function carregarTexto(texto, apenasNumeros) {
+  if (automacaoEmAndamento) throw new Error('Não é possível substituir a lista durante uma automação.');
   resultados = [];
   nomesUsados.clear();
   registrarLog('Processando contatos do texto.');
@@ -693,6 +813,7 @@ function aguardarRespostaSucesso() {
 }
 
 async function executarSequenciaLista(cooldown, opcoes) {
+  if (automacaoEmAndamento) throw new Error('Já existe uma automação em andamento.');
   if (!fila.length) throw new Error('Não há contatos na fila. Adicione contatos na caixa de texto.');
   const total = fila.length;
   pararSolicitado = false;
@@ -705,6 +826,9 @@ async function executarSequenciaLista(cooldown, opcoes) {
   printsPorPasta = Math.max(1, parseInt(opcoes.printsPorPasta, 10) || 10);
   printsSalvos = 0;
   pastaSessaoPrints = null;
+  const limiteErrosConsecutivos = Math.max(0, parseInt(opcoes.limiteErrosConsecutivos, 10) || 0);
+  let errosConsecutivos = 0;
+  let limiteErrosAtingido = false;
   if (tirarPrint) {
     if (!pastaPrints) throw new Error('Selecione uma pasta para salvar os prints.');
     fs.mkdirSync(pastaPrints, { recursive: true });
@@ -713,15 +837,22 @@ async function executarSequenciaLista(cooldown, opcoes) {
       registrarLog(`Prints organizados em ${pastaSessaoPrints}, com até ${printsPorPasta} por pasta.`);
     }
   }
+  automacaoEmAndamento = true;
   const cooldownFinal = tirarPrint && cooldown < 6 ? 6 : cooldown;
   sleepEntreCadastros = (cooldownFinal || 20) * 1000;
 
-  await abrirBrowser();
+  status = { ativo: true, mensagem: 'Abrindo o Chrome…', dados: null, restantes: fila.length };
+  try {
+    await abrirBrowser();
+  } catch (erro) {
+    automacaoEmAndamento = false;
+    throw erro;
+  }
 
   try {
     for (let i = 0; i < total; i++) {
       if (pararSolicitado) {
-        registrarLog('Automação interrompida pelo usuário.', 'aviso');
+        if (!limiteErrosAtingido) registrarLog('Automação interrompida pelo usuário.', 'aviso');
         break;
       }
 
@@ -748,14 +879,17 @@ async function executarSequenciaLista(cooldown, opcoes) {
         const resultado = await aguardarRespostaSucesso();
 
         if (resultado.sucesso) {
+          errosConsecutivos = 0;
           registrarResultado(dados, 'sucesso');
           registrarLog(`Cadastro ${i + 1}/${total} concluído com sucesso.`, 'sucesso');
           await executarScreenshot(`cadastro-${i + 1}-${dados.nome.replace(/\s+/g, '_')}`);
         } else {
+          errosConsecutivos++;
           registrarResultado(dados, 'sem_resposta', resultado.erro);
           registrarLog(`Cadastro ${i + 1}/${total} — sem confirmação de sucesso.`, 'aviso');
         }
       } catch (erro) {
+        errosConsecutivos++;
         registrarResultado(dados, 'erro', erro.message);
         registrarLog(`Erro no cadastro ${i + 1}: ${erro.message}`, 'erro');
       }
@@ -763,6 +897,11 @@ async function executarSequenciaLista(cooldown, opcoes) {
 
       fila.shift();
       if (cadastroEnviado) marcarContatoUsado(dados.telefone);
+      if (limiteErrosConsecutivos && errosConsecutivos >= limiteErrosConsecutivos) {
+        pararSolicitado = true;
+        limiteErrosAtingido = true;
+        registrarLog(`Automação interrompida após ${errosConsecutivos} erro(s) consecutivo(s).`, 'erro');
+      }
       if (arquivoOriginal) {
         const destino = path.join(path.dirname(arquivoOriginal), `${path.basename(arquivoOriginal, '.txt')}-restantes.txt`);
         fs.writeFileSync(destino, fila.map((item) => `${item.nome} | ${item.telefone}`).join('\r\n'), 'utf8');
@@ -791,18 +930,123 @@ async function executarSequenciaLista(cooldown, opcoes) {
     browser = undefined;
     page = undefined;
     registroAtual = undefined;
+    automacaoEmAndamento = false;
 
     const concluidos = resultados.filter((r) => r.status === 'sucesso').length;
+    const processados = resultados.length;
     status = {
       ativo: false,
-      mensagem: `Finalizado. ${concluidos} de ${total} cadastro(s) concluído(s).`,
+      mensagem: `Finalizado. ${concluidos} de ${processados} cadastro(s) processado(s) com sucesso.`,
       dados: null,
-      restantes: 0,
-      progresso: { atual: total, total },
+      restantes: fila.length,
+      progresso: { atual: processados, total },
       relatorio: nomeRelatorio ? { caminho: nomeRelatorio, resultados } : null,
     };
-    registrarLog(`Sequência finalizada: ${concluidos}/${total} concluídos.`, 'sucesso');
+    registrarLog(`Sequência finalizada: ${concluidos}/${processados} processados com sucesso.`, 'sucesso');
   }
+}
+
+async function executarAgendamentoDiario(origem = 'aplicativo') {
+  if (execucaoAgendadaEmAndamento) return { executado: false, motivo: 'Agendamento já em execução.' };
+  const config = obterConfiguracaoAgendamento();
+  if (!config.ativo) return { executado: false, motivo: 'Agendamento desativado.' };
+  if (origem === 'windows' && !config.windowsAtivo) return { executado: false, motivo: 'Agendamento do Windows desativado.' };
+
+  const hoje = dataLocal();
+  const agora = new Date().toISOString();
+  const registro = bancoContatos.prepare(`
+    INSERT OR IGNORE INTO execucoes_agendadas (
+      data_execucao, origem, iniciado_em, status, planejados
+    ) VALUES (?, ?, ?, 'preparando', ?)
+  `).run(hoje, origem, agora, config.quantidade);
+  if (!Number(registro.changes)) return { executado: false, motivo: 'O agendamento de hoje já foi registrado.' };
+
+  if (automacaoEmAndamento || importacaoVideo.ativo) {
+    const motivo = automacaoEmAndamento ? 'Outra automação já estava em andamento.' : 'Um vídeo estava sendo analisado.';
+    bancoContatos.prepare(`
+      UPDATE execucoes_agendadas SET status = 'ignorado', finalizado_em = ?, mensagem = ? WHERE data_execucao = ?
+    `).run(new Date().toISOString(), motivo, hoje);
+    registrarLog(`Agendamento diário ignorado: ${motivo}`, 'aviso');
+    return { executado: false, motivo };
+  }
+
+  const contatos = bancoContatos.prepare(`
+    SELECT telefone FROM contatos WHERE usado_em IS NULL ORDER BY id LIMIT ?
+  `).all(config.quantidade);
+  if (!contatos.length) {
+    const motivo = 'Não há contatos salvos disponíveis.';
+    bancoContatos.prepare(`
+      UPDATE execucoes_agendadas SET status = 'sem_contatos', finalizado_em = ?, planejados = 0, mensagem = ? WHERE data_execucao = ?
+    `).run(new Date().toISOString(), motivo, hoje);
+    registrarLog(`Agendamento diário não executado: ${motivo}`, 'aviso');
+    return { executado: false, motivo };
+  }
+
+  execucaoAgendadaEmAndamento = true;
+  nomesUsados.clear();
+  fila = contatos.map((contato) => ({
+    nome: gerarNomeAleatorio(),
+    telefone: formatarTelefoneBanco(contato.telefone),
+  }));
+  arquivoOriginal = null;
+  bancoContatos.prepare(`
+    UPDATE execucoes_agendadas SET status = 'executando', planejados = ? WHERE data_execucao = ?
+  `).run(contatos.length, hoje);
+  registrarLog(`Agendamento diário iniciado com ${contatos.length} contato(s).`);
+
+  try {
+    await executarSequenciaLista(config.cooldown, {
+      ocultarChrome: config.ocultarChrome,
+      tirarPrint: false,
+      pastaPrints: null,
+      organizarPrints: false,
+      limiteErrosConsecutivos: config.limiteErros,
+    });
+    const processados = resultados.length;
+    const sucessos = resultados.filter((resultado) => resultado.status === 'sucesso').length;
+    const statusExecucao = processados < contatos.length ? 'parcial' : 'concluido';
+    bancoContatos.prepare(`
+      UPDATE execucoes_agendadas
+      SET status = ?, finalizado_em = ?, processados = ?, sucessos = ?, mensagem = ?
+      WHERE data_execucao = ?
+    `).run(
+      statusExecucao, new Date().toISOString(), processados, sucessos,
+      `${sucessos} de ${processados} cadastro(s) processado(s) com sucesso.`, hoje,
+    );
+    return { executado: true, processados, sucessos };
+  } catch (erro) {
+    bancoContatos.prepare(`
+      UPDATE execucoes_agendadas SET status = 'erro', finalizado_em = ?, mensagem = ? WHERE data_execucao = ?
+    `).run(new Date().toISOString(), erro.message, hoje);
+    status = { ativo: false, mensagem: `Erro no agendamento: ${erro.message}`, dados: null, restantes: fila.length };
+    registrarLog(`Erro no agendamento diário: ${erro.message}`, 'erro');
+    return { executado: false, motivo: erro.message };
+  } finally {
+    execucaoAgendadaEmAndamento = false;
+  }
+}
+
+function verificarHorarioAgendamento() {
+  if (!bancoContatos || execucaoAgendadaEmAndamento) return;
+  const config = obterConfiguracaoAgendamento();
+  if (!config.ativo) return;
+  const agora = new Date();
+  const pad = (valor) => String(valor).padStart(2, '0');
+  const chaveMinuto = `${dataLocal(agora)} ${pad(agora.getHours())}:${pad(agora.getMinutes())}`;
+  if (chaveMinuto === minutoIgnoradoAgendamento) return;
+  if (`${pad(agora.getHours())}:${pad(agora.getMinutes())}` !== config.horario) return;
+  executarAgendamentoDiario('aplicativo').catch((erro) => registrarLog(`Erro no monitor do agendamento: ${erro.message}`, 'erro'));
+}
+
+function iniciarMonitorAgendamento({ verificarAgora = true, ignorarMinutoAtual = false } = {}) {
+  if (monitorAgendamento) clearInterval(monitorAgendamento);
+  if (ignorarMinutoAtual) {
+    const agora = new Date();
+    const pad = (valor) => String(valor).padStart(2, '0');
+    minutoIgnoradoAgendamento = `${dataLocal(agora)} ${pad(agora.getHours())}:${pad(agora.getMinutes())}`;
+  }
+  if (verificarAgora) verificarHorarioAgendamento();
+  monitorAgendamento = setInterval(verificarHorarioAgendamento, 15000);
 }
 
 async function parar() {
@@ -835,6 +1079,7 @@ const servidor = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/api/status') return responderJson(res, 200, status);
     if (req.method === 'GET' && req.url === '/api/contatos-salvos') return responderJson(res, 200, listarContatosSalvos());
     if (req.method === 'GET' && req.url === '/api/importacao-video/status') return responderJson(res, 200, importacaoVideo);
+    if (req.method === 'GET' && req.url === '/api/agendamento') return responderJson(res, 200, obterResumoAgendamento());
     if (req.method === 'GET' && req.url === '/api/relatorio') {
       if (!relatorioHtml) return responderJson(res, 404, { erro: 'Nenhum relatório disponível.' });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -862,6 +1107,17 @@ const servidor = http.createServer(async (req, res) => {
           importacaoVideo = { ativo: false, etapa: 'erro', progresso: 0, mensagem: erro.message, encontrados: 0, adicionados: 0, erro: erro.message };
         });
         return responderJson(res, 202, importacaoVideo);
+      }
+
+      if (req.url === '/api/agendamento') {
+        salvarConfiguracaoAgendamento(corpo);
+        return responderJson(res, 200, obterResumoAgendamento());
+      }
+
+      if (req.url === '/api/agendamento/executar') {
+        executarAgendamentoDiario(corpo.origem === 'windows' ? 'windows' : 'aplicativo')
+          .catch((erro) => registrarLog(`Erro ao iniciar agendamento: ${erro.message}`, 'erro'));
+        return responderJson(res, 202, obterResumoAgendamento());
       }
 
       if (req.url === '/api/preparar') {
@@ -896,15 +1152,16 @@ const servidor = http.createServer(async (req, res) => {
   } catch (erro) {
     registrarLog(`Erro: ${erro.message}`, 'erro');
     status = { ativo: Boolean(browser), mensagem: `Erro: ${erro.message}`, dados: null, restantes: fila.length };
-    responderJson(res, 400, status);
+    responderJson(res, 400, { ...status, erro: erro.message });
   }
 });
 
-function iniciarServidor(pastaDados) {
+function iniciarServidor(pastaDados, opcoes = {}) {
   return new Promise((resolve) => {
     inicializarBancoContatos(pastaDados);
     servidor.listen(PORTA, '127.0.0.1', () => {
       console.log(`Painel aberto em http://localhost:${PORTA}`);
+      if (!opcoes.adiarMonitorAgendamento) iniciarMonitorAgendamento();
       resolve();
     });
   });
@@ -912,4 +1169,4 @@ function iniciarServidor(pastaDados) {
 
 if (require.main === module) iniciarServidor(process.env.PAINEL_DADOS_DIR);
 
-module.exports = { iniciarServidor, PORTA };
+module.exports = { iniciarServidor, iniciarMonitorAgendamento, PORTA };
