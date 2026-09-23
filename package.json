@@ -1,7 +1,7 @@
 {
   "name": "preenchedor-amigos-do-fred",
   "private": true,
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Painel local para preparar um cadastro para revisão.",
   "main": "electron-main.js",
   "engines": {

@@ -26,7 +26,6 @@
           <button id="stop" class="secundario" type="button">■ Stop</button>
         </div>
         <button id="importar-video" class="importar-video-botao" type="button">Importar contatos de vídeo</button>
-        <button id="abrir-agendamento" class="agendamento-botao" type="button">Agendamento diário</button>
         <div class="modal-checkbox ocultar-principal">
           <input id="ocultar-chrome" type="checkbox">
           <label for="ocultar-chrome">Ocultar janela do Chrome</label>
@@ -45,6 +44,7 @@
           </div>
           <button id="carregar-contatos" class="arquivo-botao carregar-contatos-botao" type="button">Carregar .txt</button>
           <button id="abrir-contatos-salvos" class="arquivo-botao carregar-contatos-botao" type="button">Usar contatos salvos</button>
+          <button id="abrir-agendamento" class="arquivo-botao" type="button">Agendamento diário</button>
           <span id="arquivo-contatos-status" class="arquivo-contatos-status"></span>
           <label class="modal-label">Contatos</label>
           <div id="contatos-container" class="contatos-container">
@@ -128,7 +128,7 @@
       </div>
     </div>
 
-    <div id="modal-agendamento" class="modal-overlay" style="display:none">
+    <div id="modal-agendamento" class="modal-overlay modal-sobreposto" style="display:none">
       <div class="modal modal-agendamento">
         <h2>Agendamento diário</h2>
         <p class="modal-descricao">Executa um lote usando somente contatos salvos que ainda não foram utilizados.</p>
