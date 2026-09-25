@@ -37,7 +37,8 @@ const totalContatosDisponiveis = document.querySelector('#total-contatos-disponi
 const totalContatosUsados = document.querySelector('#total-contatos-usados');
 const contatosSalvosStatus = document.querySelector('#contatos-salvos-status');
 const abrirAgendamentoBtn = document.querySelector('#abrir-agendamento');
-const modalAgendamento = document.querySelector('#modal-agendamento');
+const agendamentoInline = document.querySelector('#agendamento-inline');
+const agendamentoToggleResumo = document.querySelector('#agendamento-toggle-resumo');
 const agendamentoAtivo = document.querySelector('#agendamento-ativo');
 const agendamentoHorario = document.querySelector('#agendamento-horario');
 const agendamentoQuantidade = document.querySelector('#agendamento-quantidade');
@@ -283,10 +284,14 @@ function preencherResumoAgendamento(dados) {
   agendamentoProxima.textContent = dados.proximaExecucao
     ? new Date(dados.proximaExecucao).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
     : 'Desativado';
+  agendamentoToggleResumo.textContent = config.ativo
+    ? `${config.horario} · ${config.quantidade} cadastro(s) por dia`
+    : 'Desativado · clique para configurar';
   renderizarHistoricoAgendamento(dados.historico || []);
 }
 
 async function carregarAgendamento() {
+  agendamentoInline.setAttribute('aria-busy', 'true');
   agendamentoStatus.textContent = 'Carregando configuração…';
   agendamentoStatus.className = 'arquivo-contatos-status';
   try {
@@ -311,22 +316,36 @@ async function carregarAgendamento() {
   } catch (erro) {
     agendamentoStatus.textContent = erro.message;
     agendamentoStatus.className = 'arquivo-contatos-status erro';
+  } finally {
+    agendamentoInline.removeAttribute('aria-busy');
   }
 }
 
+function fecharOpcoesAgendamento() {
+  agendamentoInline.hidden = true;
+  abrirAgendamentoBtn.setAttribute('aria-expanded', 'false');
+}
+
 abrirAgendamentoBtn.addEventListener('click', async () => {
-  modalAgendamento.style.display = 'flex';
-  await carregarAgendamento();
+  if (!agendamentoInline.hidden) {
+    fecharOpcoesAgendamento();
+    return;
+  }
+  agendamentoInline.hidden = false;
+  abrirAgendamentoBtn.setAttribute('aria-expanded', 'true');
+  abrirAgendamentoBtn.disabled = true;
+  try {
+    await carregarAgendamento();
+  } finally {
+    abrirAgendamentoBtn.disabled = false;
+  }
 });
 
 agendamentoAtivo.addEventListener('change', atualizarCamposAgendamento);
 
 agendamentoCancelar.addEventListener('click', () => {
-  modalAgendamento.style.display = 'none';
-});
-
-modalAgendamento.addEventListener('click', (evento) => {
-  if (evento.target === modalAgendamento) modalAgendamento.style.display = 'none';
+  fecharOpcoesAgendamento();
+  abrirAgendamentoBtn.focus();
 });
 
 agendamentoSalvar.addEventListener('click', async () => {
@@ -687,6 +706,7 @@ async function chamar(url, corpo) {
 }
 
 start.addEventListener('click', () => {
+  fecharOpcoesAgendamento();
   quantidadeListaInput.value = 1;
   contatosFormato.innerHTML = 'Formato: <code>Nome | Telefone</code>';
   apenasNumerosCheck.checked = false;
