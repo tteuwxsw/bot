@@ -42,9 +42,8 @@ const agendamentoToggleResumo = document.querySelector('#agendamento-toggle-resu
 const agendamentoAtivo = document.querySelector('#agendamento-ativo');
 const agendamentoHorario = document.querySelector('#agendamento-horario');
 const agendamentoQuantidade = document.querySelector('#agendamento-quantidade');
-const agendamentoCooldown = document.querySelector('#agendamento-cooldown');
 const agendamentoErros = document.querySelector('#agendamento-erros');
-const agendamentoOcultarChrome = document.querySelector('#agendamento-ocultar-chrome');
+const agendamentoOpcoesResumo = document.querySelector('#agendamento-opcoes-resumo');
 const agendamentoWindows = document.querySelector('#agendamento-windows');
 const agendamentoWindowsStatus = document.querySelector('#agendamento-windows-status');
 const agendamentoDisponiveis = document.querySelector('#agendamento-disponiveis');
@@ -72,6 +71,9 @@ let monitorVideo = null;
 let agendamentoWindowsDisponivel = false;
 let agendamentoWindowsAtivoAnterior = false;
 let configuracaoAgendamentoCarregada = null;
+let formularioListaAlterado = false;
+let ocultarChromeAlterado = false;
+let agendamentoEspecificoAlterado = false;
 
 async function requisitarJson(url, opcoes = {}) {
   const resposta = await fetch(url, opcoes);
@@ -220,6 +222,7 @@ usarContatosSalvosBtn.addEventListener('click', () => {
   quantidadeListaInput.value = quantidade;
   atualizarPlaceholder();
   gerarCampos(quantidade, telefones);
+  formularioListaAlterado = true;
   arquivoContatosStatus.textContent = `${quantidade} contato(s) salvo(s) carregado(s). Eles serão retirados dos disponíveis conforme forem usados.`;
   arquivoContatosStatus.className = 'arquivo-contatos-status sucesso';
   modalContatosSalvos.style.display = 'none';
@@ -227,11 +230,24 @@ usarContatosSalvosBtn.addEventListener('click', () => {
 
 function atualizarCamposAgendamento() {
   const ativo = agendamentoAtivo.checked;
-  [agendamentoHorario, agendamentoQuantidade, agendamentoCooldown, agendamentoErros, agendamentoOcultarChrome].forEach((campo) => {
+  [agendamentoHorario, agendamentoQuantidade, agendamentoErros].forEach((campo) => {
     campo.disabled = !ativo;
   });
   agendamentoWindows.disabled = !ativo || !agendamentoWindowsDisponivel;
   if (!ativo) agendamentoWindows.checked = false;
+}
+
+function atualizarResumoOpcoesAgendamento() {
+  const partes = [`Cooldown ${parseInt(cooldownListaInput.value, 10) || 20}s`];
+  partes.push(ocultarChrome.checked ? 'Chrome oculto' : 'Chrome visível');
+  if (tirarPrintLista.checked) {
+    partes.push(organizarPrintsLista.checked
+      ? `prints em pastas de ${parseInt(printsPorPastaInput.value, 10) || 10}`
+      : 'prints ativados');
+  } else {
+    partes.push('sem prints');
+  }
+  agendamentoOpcoesResumo.textContent = partes.join(' · ');
 }
 
 function nomeStatusAgendamento(status) {
@@ -274,19 +290,42 @@ function renderizarHistoricoAgendamento(historico) {
 
 function preencherResumoAgendamento(dados) {
   const config = dados.configuracao;
-  agendamentoAtivo.checked = config.ativo;
-  agendamentoHorario.value = config.horario;
-  agendamentoQuantidade.value = config.quantidade;
-  agendamentoCooldown.value = config.cooldown;
-  agendamentoErros.value = config.limiteErros;
-  agendamentoOcultarChrome.checked = config.ocultarChrome;
-  agendamentoDisponiveis.textContent = dados.disponiveis;
+  if (!agendamentoEspecificoAlterado) {
+    agendamentoAtivo.checked = config.ativo;
+    agendamentoHorario.value = config.horario;
+    agendamentoQuantidade.value = config.quantidade;
+    agendamentoErros.value = config.limiteErros;
+  }
   agendamentoProxima.textContent = dados.proximaExecucao
     ? new Date(dados.proximaExecucao).toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
     : 'Desativado';
   agendamentoToggleResumo.textContent = config.ativo
-    ? `${config.horario} · ${config.quantidade} cadastro(s) por dia`
+    ? `${config.horario} · ${dados.disponiveis} restante(s) · ${config.quantidade}/dia`
     : 'Desativado · clique para configurar';
+  if (!formularioListaAlterado) {
+    if (dados.fila && dados.fila.length) {
+      apenasNumerosCheck.checked = false;
+      quantidadeListaInput.value = dados.fila.length;
+      gerarCampos(dados.fila.length, dados.fila.map((contato) => `${contato.nome} | ${contato.telefone}`));
+      atualizarPlaceholder();
+    }
+    cooldownListaInput.value = config.cooldown;
+    tirarPrintLista.checked = config.tirarPrint;
+    pastaPrintsLista = config.pastaPrints || null;
+    pastaPrintLista.style.display = config.tirarPrint ? 'block' : 'none';
+    pastaSelecionadaLista.textContent = pastaPrintsLista || 'Nenhuma pasta selecionada';
+    pastaSelecionadaLista.classList.toggle('sem-pasta', !pastaPrintsLista);
+    organizarPrintsLista.checked = config.organizarPrints;
+    configOrganizarPrints.style.display = config.organizarPrints ? 'grid' : 'none';
+    printsPorPastaInput.value = config.printsPorPasta;
+    atualizarCooldownMinimo(cooldownListaInput, config.tirarPrint);
+    atualizarResumoOrganizacao();
+  }
+  if (!ocultarChromeAlterado) ocultarChrome.checked = config.ocultarChrome;
+  const totalListaAtual = pegarContatos() ? getMaxContatos() : dados.disponiveis;
+  agendamentoDisponiveis.textContent = totalListaAtual;
+  agendamentoQuantidade.max = Math.max(1, totalListaAtual);
+  atualizarResumoOpcoesAgendamento();
   renderizarHistoricoAgendamento(dados.historico || []);
 }
 
@@ -307,7 +346,9 @@ async function carregarAgendamento() {
     agendamentoWindowsAtivoAnterior = agendamentoWindowsDisponivel
       ? Boolean(tarefaWindows.ativo)
       : Boolean(dados.configuracao.windowsAtivo);
-    agendamentoWindows.checked = dados.configuracao.ativo && agendamentoWindowsAtivoAnterior;
+    if (!agendamentoEspecificoAlterado) {
+      agendamentoWindows.checked = dados.configuracao.ativo && agendamentoWindowsAtivoAnterior;
+    }
     agendamentoWindowsStatus.textContent = agendamentoWindowsDisponivel
       ? tarefaWindows.ativo ? 'Tarefa diária encontrada no Windows.' : 'Nenhuma tarefa diária ativa no Windows.'
       : 'Instale o aplicativo para habilitar o Agendador do Windows.';
@@ -333,6 +374,7 @@ abrirAgendamentoBtn.addEventListener('click', async () => {
   }
   agendamentoInline.hidden = false;
   abrirAgendamentoBtn.setAttribute('aria-expanded', 'true');
+  agendamentoEspecificoAlterado = false;
   abrirAgendamentoBtn.disabled = true;
   try {
     await carregarAgendamento();
@@ -341,7 +383,14 @@ abrirAgendamentoBtn.addEventListener('click', async () => {
   }
 });
 
-agendamentoAtivo.addEventListener('change', atualizarCamposAgendamento);
+agendamentoAtivo.addEventListener('change', () => {
+  agendamentoEspecificoAlterado = true;
+  atualizarCamposAgendamento();
+});
+agendamentoHorario.addEventListener('input', () => { agendamentoEspecificoAlterado = true; });
+agendamentoQuantidade.addEventListener('input', () => { agendamentoEspecificoAlterado = true; });
+agendamentoErros.addEventListener('input', () => { agendamentoEspecificoAlterado = true; });
+agendamentoWindows.addEventListener('change', () => { agendamentoEspecificoAlterado = true; });
 
 agendamentoCancelar.addEventListener('click', () => {
   fecharOpcoesAgendamento();
@@ -349,20 +398,51 @@ agendamentoCancelar.addEventListener('click', () => {
 });
 
 agendamentoSalvar.addEventListener('click', async () => {
+  const texto = pegarContatos();
+  const preenchidos = texto ? texto.split(/\r?\n/).length : 0;
+  const cooldown = parseInt(cooldownListaInput.value, 10);
+  const printsPorPasta = parseInt(printsPorPastaInput.value, 10);
   const configuracao = {
     ativo: agendamentoAtivo.checked,
     windowsAtivo: agendamentoAtivo.checked && agendamentoWindows.checked,
     horario: agendamentoHorario.value,
     quantidade: parseInt(agendamentoQuantidade.value, 10),
-    cooldown: parseInt(agendamentoCooldown.value, 10),
-    ocultarChrome: agendamentoOcultarChrome.checked,
+    cooldown,
+    ocultarChrome: ocultarChrome.checked,
     limiteErros: parseInt(agendamentoErros.value, 10),
+    texto,
+    apenasNumeros: apenasNumerosCheck.checked,
+    tirarPrint: tirarPrintLista.checked,
+    pastaPrints: pastaPrintsLista,
+    organizarPrints: organizarPrintsLista.checked,
+    printsPorPasta,
   };
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(configuracao.horario)
       || !Number.isInteger(configuracao.quantidade) || configuracao.quantidade < 1 || configuracao.quantidade > 500
-      || !Number.isInteger(configuracao.cooldown) || configuracao.cooldown < 5 || configuracao.cooldown > 300
+      || !Number.isInteger(cooldown) || cooldown < 5 || cooldown > 300
+      || !Number.isInteger(printsPorPasta) || printsPorPasta < 1 || printsPorPasta > 500
       || !Number.isInteger(configuracao.limiteErros) || configuracao.limiteErros < 1 || configuracao.limiteErros > 10) {
     agendamentoStatus.textContent = 'Revise o horário e os limites informados.';
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  if (configuracao.ativo && preenchidos !== getMaxContatos()) {
+    agendamentoStatus.textContent = `Preencha os ${getMaxContatos()} contatos antes de salvar o agendamento.`;
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  if (configuracao.ativo && configuracao.quantidade > preenchidos) {
+    agendamentoStatus.textContent = 'A quantidade diária não pode ser maior que a lista carregada.';
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  if (configuracao.ativo && tirarPrintLista.checked && !pastaPrintsLista) {
+    agendamentoStatus.textContent = 'Selecione a pasta onde os prints serão salvos.';
+    agendamentoStatus.className = 'arquivo-contatos-status erro';
+    return;
+  }
+  if (configuracao.ativo && organizarPrintsLista.checked && (printsPorPasta < 1 || printsPorPasta > 500)) {
+    agendamentoStatus.textContent = 'Informe entre 1 e 500 prints por pasta.';
     agendamentoStatus.className = 'arquivo-contatos-status erro';
     return;
   }
@@ -412,6 +492,8 @@ agendamentoSalvar.addEventListener('click', async () => {
 });
 
 ocultarChrome.addEventListener('change', async () => {
+  ocultarChromeAlterado = true;
+  atualizarResumoOpcoesAgendamento();
   await chamar('/api/toggle-chrome', { ocultar: ocultarChrome.checked });
 });
 
@@ -424,12 +506,14 @@ function atualizarCooldownMinimo(input, tirarPrintChecked) {
 }
 
 tirarPrintLista.addEventListener('change', () => {
+  formularioListaAlterado = true;
   pastaPrintLista.style.display = tirarPrintLista.checked ? 'block' : 'none';
   if (!tirarPrintLista.checked) {
     organizarPrintsLista.checked = false;
     configOrganizarPrints.style.display = 'none';
   }
   atualizarCooldownMinimo(cooldownListaInput, tirarPrintLista.checked);
+  atualizarResumoOpcoesAgendamento();
 });
 
 function atualizarResumoOrganizacao() {
@@ -444,19 +528,32 @@ function atualizarResumoOrganizacao() {
 }
 
 organizarPrintsLista.addEventListener('change', () => {
+  formularioListaAlterado = true;
   configOrganizarPrints.style.display = organizarPrintsLista.checked ? 'grid' : 'none';
   atualizarResumoOrganizacao();
+  atualizarResumoOpcoesAgendamento();
 });
 
-printsPorPastaInput.addEventListener('input', atualizarResumoOrganizacao);
+printsPorPastaInput.addEventListener('input', () => {
+  formularioListaAlterado = true;
+  atualizarResumoOrganizacao();
+  atualizarResumoOpcoesAgendamento();
+});
+
+cooldownListaInput.addEventListener('input', () => {
+  formularioListaAlterado = true;
+  atualizarResumoOpcoesAgendamento();
+});
 
 selecionarPastaLista.addEventListener('click', async () => {
   if (!window.painelLocal || !window.painelLocal.selecionarPasta) return;
   const pasta = await window.painelLocal.selecionarPasta();
   if (pasta) {
+    formularioListaAlterado = true;
     pastaPrintsLista = pasta;
     pastaSelecionadaLista.textContent = pasta;
     pastaSelecionadaLista.classList.remove('sem-pasta');
+    atualizarResumoOpcoesAgendamento();
   }
 });
 
@@ -516,6 +613,7 @@ function atualizarPlaceholder() {
 }
 
 quantidadeListaInput.addEventListener('input', () => {
+  formularioListaAlterado = true;
   const max = getMaxContatos();
   const camposAtuais = contatosContainer.querySelectorAll('.contatos-campo');
   const valores = [];
@@ -526,10 +624,12 @@ quantidadeListaInput.addEventListener('input', () => {
 });
 
 apenasNumerosCheck.addEventListener('change', () => {
+  formularioListaAlterado = true;
   atualizarPlaceholder();
 });
 
 contatosContainer.addEventListener('input', () => {
+  formularioListaAlterado = true;
   contarContatos();
 });
 
@@ -545,6 +645,7 @@ contatosContainer.addEventListener('keydown', (e) => {
 });
 
 function organizarContatos() {
+  formularioListaAlterado = true;
   const campos = contatosContainer.querySelectorAll('.contatos-campo');
   const valores = [];
   campos.forEach(c => valores.push(c.value.trim()));
@@ -638,6 +739,7 @@ carregarContatosBtn.addEventListener('click', async () => {
 
   quantidadeListaInput.value = linhas.length;
   gerarCampos(linhas.length, linhas);
+  formularioListaAlterado = true;
   organizarContatos();
   arquivoContatosStatus.textContent = `${arquivo.nome}: ${linhas.length} contato(s) carregado(s).`;
   arquivoContatosStatus.classList.add('sucesso');
@@ -706,6 +808,7 @@ async function chamar(url, corpo) {
 }
 
 start.addEventListener('click', () => {
+  formularioListaAlterado = false;
   fecharOpcoesAgendamento();
   quantidadeListaInput.value = 1;
   contatosFormato.innerHTML = 'Formato: <code>Nome | Telefone</code>';
@@ -723,6 +826,7 @@ start.addEventListener('click', () => {
   printsPorPastaInput.value = 10;
   atualizarCooldownMinimo(cooldownListaInput, false);
   atualizarResumoOrganizacao();
+  atualizarResumoOpcoesAgendamento();
   modalLista.style.display = 'flex';
   quantidadeListaInput.focus();
 });

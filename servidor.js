@@ -10,7 +10,7 @@ const { chromium } = require('playwright');
 const execFileAsync = promisify(execFile);
 
 const PORTA = parseInt(process.env.PAINEL_PORTA, 10) || 3030;
-const URL_CADASTRO = 'https://amigosdofred.com.br/cadastro';
+const URL_CADASTRO = process.env.PAINEL_URL_CADASTRO || 'https://amigosdofred.com.br/cadastro';
 let sleepEntreCadastros = 20000;
 let relatorioHtml = null;
 
@@ -59,6 +59,9 @@ function inicializarBancoContatos(diretorio) {
   diretorioDados = diretorio || path.join(__dirname, 'dados');
   fs.mkdirSync(diretorioDados, { recursive: true });
   bancoContatos = new DatabaseSync(path.join(diretorioDados, 'contatos.sqlite'));
+  const filaAgendamentoExistia = Boolean(bancoContatos.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fila_agendamento'
+  `).get());
   bancoContatos.exec(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS contatos (
@@ -77,7 +80,18 @@ function inicializarBancoContatos(diretorio) {
       cooldown INTEGER NOT NULL DEFAULT 20,
       ocultar_chrome INTEGER NOT NULL DEFAULT 1,
       limite_erros INTEGER NOT NULL DEFAULT 3,
+      tirar_print INTEGER NOT NULL DEFAULT 0,
+      pasta_prints TEXT,
+      organizar_prints INTEGER NOT NULL DEFAULT 0,
+      prints_por_pasta INTEGER NOT NULL DEFAULT 10,
       atualizado_em TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fila_agendamento (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ordem INTEGER NOT NULL,
+      nome TEXT NOT NULL,
+      telefone TEXT NOT NULL,
+      criado_em TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS execucoes_agendadas (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,6 +113,21 @@ function inicializarBancoContatos(diretorio) {
         mensagem = 'O aplicativo foi fechado antes da conclusão.'
     WHERE status IN ('preparando', 'executando');
   `);
+  const colunasAgendamento = new Set(
+    bancoContatos.prepare('PRAGMA table_info(configuracao_agendamento)').all().map((coluna) => coluna.name),
+  );
+  const novasColunas = [
+    ['tirar_print', 'INTEGER NOT NULL DEFAULT 0'],
+    ['pasta_prints', 'TEXT'],
+    ['organizar_prints', 'INTEGER NOT NULL DEFAULT 0'],
+    ['prints_por_pasta', 'INTEGER NOT NULL DEFAULT 10'],
+  ];
+  for (const [nome, definicao] of novasColunas) {
+    if (!colunasAgendamento.has(nome)) bancoContatos.exec(`ALTER TABLE configuracao_agendamento ADD COLUMN ${nome} ${definicao}`);
+  }
+  if (!filaAgendamentoExistia) {
+    bancoContatos.exec('UPDATE configuracao_agendamento SET ativo = 0, windows_ativo = 0 WHERE id = 1');
+  }
 }
 
 function dataLocal(data = new Date()) {
@@ -116,6 +145,10 @@ function obterConfiguracaoAgendamento() {
     cooldown: config.cooldown,
     ocultarChrome: Boolean(config.ocultar_chrome),
     limiteErros: config.limite_erros,
+    tirarPrint: Boolean(config.tirar_print),
+    pastaPrints: config.pasta_prints,
+    organizarPrints: Boolean(config.organizar_prints),
+    printsPorPasta: config.prints_por_pasta,
   };
 }
 
@@ -124,10 +157,16 @@ function validarConfiguracaoAgendamento(dados) {
   const quantidade = parseInt(dados.quantidade, 10);
   const cooldown = parseInt(dados.cooldown, 10);
   const limiteErros = parseInt(dados.limiteErros, 10);
+  const tirarPrint = Boolean(dados.tirarPrint);
+  const pastaPrints = tirarPrint ? String(dados.pastaPrints || '').trim() : null;
+  const organizarPrints = tirarPrint && Boolean(dados.organizarPrints);
+  const printsPorPasta = parseInt(dados.printsPorPasta, 10);
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(horario)) throw new Error('Informe um horário válido.');
   if (!Number.isInteger(quantidade) || quantidade < 1 || quantidade > 500) throw new Error('A quantidade diária deve ficar entre 1 e 500.');
   if (!Number.isInteger(cooldown) || cooldown < 5 || cooldown > 300) throw new Error('O cooldown deve ficar entre 5 e 300 segundos.');
   if (!Number.isInteger(limiteErros) || limiteErros < 1 || limiteErros > 10) throw new Error('O limite de erros deve ficar entre 1 e 10.');
+  if (tirarPrint && !pastaPrints) throw new Error('Selecione a pasta onde os prints serão salvos.');
+  if (!Number.isInteger(printsPorPasta) || printsPorPasta < 1 || printsPorPasta > 500) throw new Error('Informe entre 1 e 500 prints por pasta.');
   return {
     ativo: Boolean(dados.ativo),
     windowsAtivo: Boolean(dados.windowsAtivo),
@@ -136,20 +175,49 @@ function validarConfiguracaoAgendamento(dados) {
     cooldown,
     ocultarChrome: Boolean(dados.ocultarChrome),
     limiteErros,
+    tirarPrint,
+    pastaPrints,
+    organizarPrints,
+    printsPorPasta,
   };
 }
 
 function salvarConfiguracaoAgendamento(dados) {
+  if (automacaoEmAndamento) throw new Error('Não é possível alterar o agendamento durante uma automação.');
   const config = validarConfiguracaoAgendamento(dados);
-  bancoContatos.prepare(`
-    UPDATE configuracao_agendamento
-    SET ativo = ?, windows_ativo = ?, horario = ?, quantidade = ?, cooldown = ?,
-        ocultar_chrome = ?, limite_erros = ?, atualizado_em = ?
-    WHERE id = 1
-  `).run(
-    Number(config.ativo), Number(config.windowsAtivo), config.horario, config.quantidade,
-    config.cooldown, Number(config.ocultarChrome), config.limiteErros, new Date().toISOString(),
-  );
+  let contatos = null;
+  if (config.ativo) {
+    contatos = converterTextoEmContatos(dados.texto, Boolean(dados.apenasNumeros));
+    if (contatos.length > 500) throw new Error('O agendamento aceita no máximo 500 contatos na fila.');
+    if (config.quantidade > contatos.length) throw new Error('A quantidade diária não pode ser maior que a lista carregada.');
+  }
+
+  bancoContatos.exec('BEGIN IMMEDIATE');
+  try {
+    bancoContatos.prepare(`
+      UPDATE configuracao_agendamento
+      SET ativo = ?, windows_ativo = ?, horario = ?, quantidade = ?, cooldown = ?,
+          ocultar_chrome = ?, limite_erros = ?, tirar_print = ?, pasta_prints = ?,
+          organizar_prints = ?, prints_por_pasta = ?, atualizado_em = ?
+      WHERE id = 1
+    `).run(
+      Number(config.ativo), Number(config.windowsAtivo), config.horario, config.quantidade,
+      config.cooldown, Number(config.ocultarChrome), config.limiteErros, Number(config.tirarPrint),
+      config.pastaPrints, Number(config.organizarPrints), config.printsPorPasta, new Date().toISOString(),
+    );
+    if (contatos) {
+      bancoContatos.exec('DELETE FROM fila_agendamento');
+      const inserir = bancoContatos.prepare(`
+        INSERT INTO fila_agendamento (ordem, nome, telefone, criado_em) VALUES (?, ?, ?, ?)
+      `);
+      const criadoEm = new Date().toISOString();
+      contatos.forEach((contato, indice) => inserir.run(indice + 1, contato.nome, contato.telefone, criadoEm));
+    }
+    bancoContatos.exec('COMMIT');
+  } catch (erro) {
+    bancoContatos.exec('ROLLBACK');
+    throw erro;
+  }
   return config;
 }
 
@@ -168,7 +236,10 @@ function calcularProximaExecucao(config) {
 
 function obterResumoAgendamento() {
   const configuracao = obterConfiguracaoAgendamento();
-  const disponiveis = bancoContatos.prepare('SELECT COUNT(*) AS total FROM contatos WHERE usado_em IS NULL').get().total;
+  const filaSalva = bancoContatos.prepare(`
+    SELECT id, nome, telefone FROM fila_agendamento ORDER BY ordem, id LIMIT 500
+  `).all();
+  const disponiveis = bancoContatos.prepare('SELECT COUNT(*) AS total FROM fila_agendamento').get().total;
   const historico = bancoContatos.prepare(`
     SELECT data_execucao AS data, origem, iniciado_em AS iniciadoEm, finalizado_em AS finalizadoEm,
            status, planejados, processados, sucessos, mensagem
@@ -180,6 +251,7 @@ function obterResumoAgendamento() {
     configuracao,
     proximaExecucao: calcularProximaExecucao(configuracao),
     disponiveis,
+    fila: filaSalva,
     emExecucao: execucaoAgendadaEmAndamento,
     historico,
   };
@@ -602,7 +674,7 @@ function carregarDados(caminho) {
     return { nome, telefone };
   });
   if (!novosDados.length) throw new Error('O arquivo não possui dados válidos.');
-  fila = novosDados;
+  fila = vincularComFilaAgendada(novosDados);
   arquivoOriginal = caminho;
   registrarLog(`${fila.length} registro(s) adicionados à fila.`, 'sucesso');
   status = { ativo: false, mensagem: `${fila.length} registro(s) carregado(s).`, dados: null, restantes: fila.length };
@@ -619,12 +691,9 @@ function formatarTelefone(telefone) {
   return null;
 }
 
-function carregarTexto(texto, apenasNumeros) {
-  if (automacaoEmAndamento) throw new Error('Não é possível substituir a lista durante uma automação.');
-  resultados = [];
+function converterTextoEmContatos(texto, apenasNumeros) {
   nomesUsados.clear();
-  registrarLog('Processando contatos do texto.');
-  const linhas = texto.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const linhas = String(texto || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const novosDados = linhas.map((linha, i) => {
     if (apenasNumeros) {
       const telefone = linha.replace(/\D/g, '');
@@ -641,7 +710,28 @@ function carregarTexto(texto, apenasNumeros) {
     return { nome, telefone: formatado };
   });
   if (!novosDados.length) throw new Error('Nenhum contato válido encontrado.');
-  fila = novosDados;
+  return novosDados;
+}
+
+function vincularComFilaAgendada(contatos) {
+  if (!bancoContatos) return contatos;
+  const idsPorTelefone = new Map();
+  for (const contato of bancoContatos.prepare('SELECT id, telefone FROM fila_agendamento ORDER BY ordem, id').all()) {
+    const chave = contato.telefone.replace(/\D/g, '');
+    if (!idsPorTelefone.has(chave)) idsPorTelefone.set(chave, []);
+    idsPorTelefone.get(chave).push(contato.id);
+  }
+  return contatos.map((contato) => {
+    const ids = idsPorTelefone.get(contato.telefone.replace(/\D/g, ''));
+    return ids && ids.length ? { ...contato, agendamentoId: ids.shift() } : contato;
+  });
+}
+
+function carregarTexto(texto, apenasNumeros) {
+  if (automacaoEmAndamento) throw new Error('Não é possível substituir a lista durante uma automação.');
+  resultados = [];
+  registrarLog('Processando contatos do texto.');
+  fila = vincularComFilaAgendada(converterTextoEmContatos(texto, apenasNumeros));
   arquivoOriginal = null;
   registrarLog(`${fila.length} contato(s) adicionado(s) à fila.`, 'sucesso');
   status = { ativo: false, mensagem: `${fila.length} contato(s) carregado(s).`, dados: null, restantes: fila.length };
@@ -752,14 +842,15 @@ async function selecionarSelect2Valor(valor) {
 }
 
 async function buscarRecrutadorAJAX(recrutador) {
-  const recruitId = await page.evaluate(async () => {
+  const urlIndicadores = new URL('indicadores', `${URL_CADASTRO.replace(/\/$/, '')}/`).toString();
+  const recruitId = await page.evaluate(async (url) => {
     try {
-      const resp = await fetch('https://amigosdofred.com.br/cadastro/indicadores?q=Professor%20Algudao');
+      const resp = await fetch(`${url}?q=Professor%20Algudao`);
       const data = await resp.json();
       if (data.results && data.results.length > 0) return data.results[0].id;
     } catch (e) {}
     return null;
-  });
+  }, urlIndicadores);
 
   if (!recruitId) throw new Error('Não encontrei o recrutador: ' + recrutador);
 
@@ -785,30 +876,28 @@ async function preencherEEnviar(dados) {
   await sleep(500);
   await page.locator('#lgpd_consent').check();
   await sleep(1000);
-  await page.locator('button[data-testid="registration-submit"]').click();
+  const respostaCadastro = aguardarRespostaSucesso();
+  try {
+    await page.locator('button[data-testid="registration-submit"]').click();
+  } catch (erro) {
+    const resultado = await respostaCadastro;
+    if (resultado.enviado) return resultado;
+    throw erro;
+  }
   registrarLog(`Cadastro enviado: ${dados.nome} / ${dados.telefone}.`);
+  return respostaCadastro;
 }
 
 function aguardarRespostaSucesso() {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const timeout = setTimeout(() => {
-      if (!resolved) { resolved = true; resolve({ sucesso: false, statusHttp: null, erro: 'Timeout 15s sem resposta' }); }
-    }, 15000);
-
-    function handler(resposta) {
-      const pedido = resposta.request();
-      const envioDoCadastro = pedido.method() === 'POST' && pedido.url().startsWith(URL_CADASTRO);
-      if (envioDoCadastro && !resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        page.removeListener('response', handler);
-        const status = resposta.status();
-        const ok = status >= 200 && status < 400;
-        resolve({ sucesso: ok, statusHttp: status, erro: ok ? null : `HTTP ${status}` });
-      }
-    }
-    page.on('response', handler);
+  const filtro = (pedido) => pedido.method() === 'POST' && pedido.url().startsWith(URL_CADASTRO);
+  const pedido = page.waitForRequest(filtro, { timeout: 15000 }).catch(() => null);
+  const resposta = page.waitForResponse((item) => filtro(item.request()), { timeout: 15000 }).catch(() => null);
+  return Promise.all([pedido, resposta]).then(([envio, retorno]) => {
+    if (!envio) return { enviado: false, sucesso: false, statusHttp: null, erro: 'Timeout 15s sem envio' };
+    if (!retorno) return { enviado: true, sucesso: false, statusHttp: null, erro: 'Timeout 15s sem resposta' };
+    const statusHttp = retorno.status();
+    const sucesso = statusHttp >= 200 && statusHttp < 400;
+    return { enviado: true, sucesso, statusHttp, erro: sucesso ? null : `HTTP ${statusHttp}` };
   });
 }
 
@@ -874,9 +963,8 @@ async function executarSequenciaLista(cooldown, opcoes) {
       inicioCiclo = Date.now();
       let cadastroEnviado = false;
       try {
-        await preencherEEnviar(dados);
-        cadastroEnviado = true;
-        const resultado = await aguardarRespostaSucesso();
+        const resultado = await preencherEEnviar(dados);
+        cadastroEnviado = Boolean(resultado.enviado);
 
         if (resultado.sucesso) {
           errosConsecutivos = 0;
@@ -896,7 +984,17 @@ async function executarSequenciaLista(cooldown, opcoes) {
       temposCiclo.push(Date.now() - inicioCiclo);
 
       fila.shift();
-      if (cadastroEnviado) marcarContatoUsado(dados.telefone);
+      if (cadastroEnviado) {
+        marcarContatoUsado(dados.telefone);
+        if (dados.agendamentoId) {
+          bancoContatos.prepare('DELETE FROM fila_agendamento WHERE id = ?').run(dados.agendamentoId);
+        } else {
+          bancoContatos.prepare(`
+            DELETE FROM fila_agendamento
+            WHERE id = (SELECT id FROM fila_agendamento WHERE telefone = ? ORDER BY ordem, id LIMIT 1)
+          `).run(dados.telefone);
+        }
+      }
       if (limiteErrosConsecutivos && errosConsecutivos >= limiteErrosConsecutivos) {
         pararSolicitado = true;
         limiteErrosAtingido = true;
@@ -971,10 +1069,10 @@ async function executarAgendamentoDiario(origem = 'aplicativo') {
   }
 
   const contatos = bancoContatos.prepare(`
-    SELECT telefone FROM contatos WHERE usado_em IS NULL ORDER BY id LIMIT ?
+    SELECT id, nome, telefone FROM fila_agendamento ORDER BY ordem, id LIMIT ?
   `).all(config.quantidade);
   if (!contatos.length) {
-    const motivo = 'Não há contatos salvos disponíveis.';
+    const motivo = 'Não há contatos restantes na fila agendada.';
     bancoContatos.prepare(`
       UPDATE execucoes_agendadas SET status = 'sem_contatos', finalizado_em = ?, planejados = 0, mensagem = ? WHERE data_execucao = ?
     `).run(new Date().toISOString(), motivo, hoje);
@@ -983,10 +1081,10 @@ async function executarAgendamentoDiario(origem = 'aplicativo') {
   }
 
   execucaoAgendadaEmAndamento = true;
-  nomesUsados.clear();
   fila = contatos.map((contato) => ({
-    nome: gerarNomeAleatorio(),
-    telefone: formatarTelefoneBanco(contato.telefone),
+    agendamentoId: contato.id,
+    nome: contato.nome,
+    telefone: contato.telefone,
   }));
   arquivoOriginal = null;
   bancoContatos.prepare(`
@@ -997,14 +1095,19 @@ async function executarAgendamentoDiario(origem = 'aplicativo') {
   try {
     await executarSequenciaLista(config.cooldown, {
       ocultarChrome: config.ocultarChrome,
-      tirarPrint: false,
-      pastaPrints: null,
-      organizarPrints: false,
+      tirarPrint: config.tirarPrint,
+      pastaPrints: config.pastaPrints,
+      organizarPrints: config.organizarPrints,
+      printsPorPasta: config.printsPorPasta,
       limiteErrosConsecutivos: config.limiteErros,
     });
     const processados = resultados.length;
     const sucessos = resultados.filter((resultado) => resultado.status === 'sucesso').length;
-    const statusExecucao = processados < contatos.length ? 'parcial' : 'concluido';
+    const placeholders = contatos.map(() => '?').join(', ');
+    const pendentesDoLote = bancoContatos.prepare(`
+      SELECT COUNT(*) AS total FROM fila_agendamento WHERE id IN (${placeholders})
+    `).get(...contatos.map((contato) => contato.id)).total;
+    const statusExecucao = processados < contatos.length || pendentesDoLote > 0 ? 'parcial' : 'concluido';
     bancoContatos.prepare(`
       UPDATE execucoes_agendadas
       SET status = ?, finalizado_em = ?, processados = ?, sucessos = ?, mensagem = ?

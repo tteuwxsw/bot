@@ -44,7 +44,7 @@
           </div>
           <button id="carregar-contatos" class="arquivo-botao carregar-contatos-botao" type="button">Carregar .txt</button>
           <button id="abrir-contatos-salvos" class="arquivo-botao carregar-contatos-botao" type="button">Usar contatos salvos</button>
-          <button id="abrir-agendamento" class="agendamento-toggle" type="button" aria-expanded="false" aria-controls="agendamento-inline">
+          <button id="abrir-agendamento" class="agendamento-toggle" style="order:10" type="button" aria-expanded="false" aria-controls="agendamento-inline">
             <span class="agendamento-toggle-icone" aria-hidden="true"></span>
             <span class="agendamento-toggle-texto">
               <strong>Agendamento diário</strong>
@@ -52,10 +52,10 @@
             </span>
             <span class="agendamento-toggle-seta" aria-hidden="true"></span>
           </button>
-          <section id="agendamento-inline" class="agendamento-inline" hidden>
-            <p class="modal-descricao">Executa um lote usando somente contatos salvos que ainda não foram utilizados.</p>
+          <section id="agendamento-inline" class="agendamento-inline" style="order:11" hidden>
+            <p class="modal-descricao">Salva esta lista e continua com os contatos restantes nos próximos dias, usando as opções configuradas nesta tela.</p>
             <div class="agendamento-resumo">
-              <div><span>Contatos disponíveis</span><strong id="agendamento-disponiveis">0</strong></div>
+              <div><span>Contatos restantes na fila</span><strong id="agendamento-disponiveis">0</strong></div>
               <div><span>Próxima execução</span><strong id="agendamento-proxima">Desativado</strong></div>
             </div>
             <div class="modal-checkbox agendamento-ativar">
@@ -67,14 +67,11 @@
               <input id="agendamento-horario" type="time" value="09:00" class="modal-input">
               <label class="modal-label" for="agendamento-quantidade">Cadastros por dia</label>
               <input id="agendamento-quantidade" type="number" min="1" max="500" value="40" class="modal-input">
-              <label class="modal-label" for="agendamento-cooldown">Cooldown (segundos)</label>
-              <input id="agendamento-cooldown" type="number" min="5" max="300" value="20" class="modal-input">
               <label class="modal-label" for="agendamento-erros">Parar após erros seguidos</label>
               <input id="agendamento-erros" type="number" min="1" max="10" value="3" class="modal-input">
             </div>
-            <div class="modal-checkbox">
-              <input id="agendamento-ocultar-chrome" type="checkbox" checked>
-              <label for="agendamento-ocultar-chrome">Ocultar Chrome durante o lote</label>
+            <div class="agendamento-modo">
+              <div><strong>Opções usadas da lista</strong><span id="agendamento-opcoes-resumo">Cooldown, Chrome e prints configurados acima.</span></div>
             </div>
             <div class="agendamento-modo">
               <div><strong>Com o aplicativo aberto</strong><span>O próprio bot inicia o lote no horário configurado.</span></div>

@@ -1,6 +1,6 @@
 {
-  "versao": "1.0.13",
-  "url": "https://github.com/tteuwxsw/bot/releases/download/v1.0.13/Painel.de.Preenchimento.Setup.1.0.13.exe",
+  "versao": "1.0.14",
+  "url": "https://github.com/tteuwxsw/bot/releases/download/v1.0.14/Painel.de.Preenchimento.Setup.1.0.14.exe",
   "data": "2026-09-22",
-  "mudancas": "Agendamento diário integrado e expansível dentro de Iniciar com lista"
+  "mudancas": "Agendamento diário usa a lista, cooldown, prints, pastas e Chrome configurados na mesma tela"
 }
